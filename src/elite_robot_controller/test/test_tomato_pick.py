@@ -1,0 +1,375 @@
+"""로봇 없이 검증하는 픽앤플레이스 계산.
+
+노드를 띄우지 않고 순수 계산만 본다 — 좌표 변환, 단위 환산, 검출 파싱,
+그리고 "설정이 비어 있으면 시작을 막는다"는 규칙이다.
+"""
+
+import math
+
+from elite_robot_controller.tomato import geometry, pick_config, vision_interface
+
+
+def test_pose_units_round_trip():
+    human = [400.0, -50.0, 300.0, 180.0, 0.0, 90.0]
+    si = pick_config.pose_to_si(human)
+    assert si[0] == 0.4 and si[1] == -0.05
+    assert math.isclose(si[3], math.pi, rel_tol=1e-9)
+    back = pick_config.pose_to_human(si)
+    assert all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip(human, back))
+
+
+def test_rotvec_round_trip():
+    for vec in ([0.1, -0.4, 2.9], [0.0, 0.0, math.pi], [0.0, 0.0, 0.0]):
+        out = geometry.matrix_to_rotvec(geometry.rotvec_to_matrix(*vec))
+        assert all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(vec, out))
+
+
+def test_flat_array_is_parsed_as_five_fields():
+    class Msg:
+        data = [100.0, 20.0, 300.0, 55.0, 120.0, 150.0, -30.0, 310.0, 60.0, 140.0]
+
+    detections = vision_interface.parse_detections(Msg())
+    assert len(detections) == 2
+    assert detections[0].x == 0.1 and detections[0].diameter == 55.0
+    assert detections[1].weight == 140.0
+
+
+def test_hand_in_eye_transform_uses_tool_pose():
+    """카메라 좌표는 툴 pose 를 거쳐 베이스 좌표가 된다."""
+    cfg = pick_config.VisionConfig(detection_frame="camera",
+                                   hand_eye_xyz_mm=[0.0, 0.0, 50.0])
+    detection = vision_interface.Detection(x=0.05, y=0.02, z=0.30)
+    # TCP 가 X 축으로 180도 돌아 아래를 보는 자세.
+    tool_pose = [0.4, 0.0, 0.4, math.pi, 0.0, 0.0]
+    x, y, z = vision_interface.detection_to_base(detection, tool_pose, cfg)
+    assert math.isclose(x, 0.45, abs_tol=1e-6)
+    assert math.isclose(y, -0.02, abs_tol=1e-6)
+    # 카메라가 툴보다 50 mm 앞(+Z)에 있고 아래를 보므로 350 mm 아래가 된다.
+    assert math.isclose(z, 0.05, abs_tol=1e-6)
+
+
+def test_base_frame_detection_is_not_transformed():
+    cfg = pick_config.VisionConfig(detection_frame="base")
+    detection = vision_interface.Detection(x=0.5, y=0.1, z=0.2)
+    assert vision_interface.detection_to_base(
+        detection, [0, 0, 0, 0, 0, 0], cfg) == [0.5, 0.1, 0.2]
+
+
+def test_gripper_offset_shifts_tcp_the_other_way():
+    """파지점이 툴 +X 로 30 mm 나와 있으면 TCP 는 그만큼 뒤로 선다."""
+    pose = [0.45, 0.0, 0.4, 0.0, 0.0, 0.0]   # 회전 없음 -> 툴축 = 베이스축
+    shifted = geometry.transform_in_tool(pose, [-0.03, 0.0, 0.0])
+    assert math.isclose(shifted[0], 0.42, abs_tol=1e-9)
+    # 파지점을 다시 앞으로 보내면 원래 목표로 돌아온다.
+    grip = geometry.transform_in_tool(shifted, [0.03, 0.0, 0.0])
+    assert math.isclose(grip[0], 0.45, abs_tol=1e-9)
+
+
+def test_empty_config_lists_every_missing_value():
+    gaps = pick_config.PickConfig().missing()
+    for name in ("home_joint", "pick_wait_pose", "place_point_pose"):
+        assert name in gaps
+
+
+def test_filled_config_has_no_gaps():
+    cfg = pick_config.PickConfig(
+        pick_wait_pose=pick_config.pose_to_si([400, 0, 400, 180, 0, 0]),
+        place_point_pose=pick_config.pose_to_si([300, -200, 300, 180, 0, 0]),
+        home_joint=[0.0, -1.57, 1.57, 0.0, 1.57, 0.0],
+        vision=pick_config.VisionConfig(
+            detection_topic="/vision/tomatoes",
+            trigger_topic="/vision/trigger",
+            hand_eye_xyz_mm=[0.0, 0.0, 50.0],
+        ),
+        gripper=pick_config.GripperConfig(backend="topic", topic="/gripper/close"),
+    )
+    assert cfg.missing() == []
+
+
+def test_camera_delta_matches_readme_mapping():
+    """README: 카메라 (x, y) -> (-y, -x) 만큼 움직이면 중심에 온다."""
+    cfg = pick_config.VisionConfig(detection_frame="camera_delta",
+                                   camera_axis_map=["-y", "-x"])
+    detection = vision_interface.Detection(x=0.060, y=0.040, z=0.22)
+    tool_pose = [0.400, 0.000, 0.400, math.pi, 0.0, 0.0]
+    x, y, z = vision_interface.detection_to_base(detection, tool_pose, cfg)
+    assert math.isclose(x, 0.360, abs_tol=1e-9)   # 400 - 40 mm
+    assert math.isclose(y, -0.060, abs_tol=1e-9)  # 0 - 60 mm
+    assert z == tool_pose[2]                      # Z 는 건드리지 않는다
+
+
+def test_camera_axis_map_can_be_flipped():
+    """장착 방향이 다르면 축 대응만 바꿔 쓸 수 있어야 한다."""
+    cfg = pick_config.VisionConfig(detection_frame="camera_delta",
+                                   camera_axis_map=["+y", "+x"])
+    detection = vision_interface.Detection(x=0.060, y=0.040, z=0.22)
+    x, y, _ = vision_interface.detection_to_base(
+        detection, [0.0, 0.0, 0.4, 0, 0, 0], cfg)
+    assert math.isclose(x, 0.040, abs_tol=1e-9)
+    assert math.isclose(y, 0.060, abs_tol=1e-9)
+
+
+def test_weights_and_heights_merge_by_index():
+    """세 토픽은 같은 순서로 온다 — i 번째끼리 같은 토마토여야 한다."""
+    class PoseMsg:
+        class P:
+            def __init__(self, x, y, z):
+                self.position = type("pos", (), {"x": x, "y": y, "z": z})()
+        poses = [P(0.01, 0.02, 0.2), P(-0.03, 0.04, 0.25)]
+
+    detections = vision_interface.parse_detections(PoseMsg())
+    weights, heights = [120.0, 95.5], [0.058, 0.051]
+    for i, det in enumerate(detections):
+        det.weight = weights[i]
+        det.height = heights[i] * 1000.0
+    assert detections[0].as_dict()["weight_g"] == 120.0
+    assert detections[1].as_dict()["height_mm"] == 51.0
+
+
+def test_default_config_only_needs_taught_poses():
+    """비전·그리퍼 기본값은 실제 인터페이스에 맞춰 두었으므로,
+    현장에서 가르칠 값(대기 자세·놓는 자리·하강 높이)만 비어 있어야 한다."""
+    gaps = pick_config.PickConfig().missing()
+    assert "vision.detection_topic" not in gaps
+    assert "gripper.backend 설정" not in gaps
+
+
+def test_taught_values_override_config_and_ignore_unknown_keys(tmp_path):
+    """펜던트로 가르친 값은 설정 파일 위에 덮어쓴다(관절은 deg 로 저장, rad 로 씀)."""
+    from elite_robot_controller.tomato import teach_store
+
+    path = str(tmp_path / "taught.yaml")
+    teach_store.save(path, {
+        "home_joint_deg": [0.0, -90.0, 90.0, 0.0, 90.0, 0.0],
+        "pick_wait_pose_mm_deg": [400.0, 0.0, 525.0, -180.0, 0.0, -45.0],
+        "pick_wait_joint_deg": [10.0, -80.0, 100.0, -20.0, 90.0, 0.0],
+        "waypoints_wait_deg": [[5.0, -85.0, 95.0, -10.0, 90.0, 0.0]],
+        "place_approach_mm": 80.0,
+        "max_descend_z_mm": 210.0,   # 예전 항목 — 이제는 버린다
+        "unknown_key": 1,            # 알 수 없는 항목은 저장도 반영도 하지 않는다
+    })
+    data = teach_store.load(path)
+    assert "unknown_key" not in data and "max_descend_z_mm" not in data
+
+    cfg = pick_config.PickConfig()
+    applied = teach_store.apply(cfg, data)
+    assert {"home_joint_deg", "pick_wait_pose_mm_deg", "pick_wait_joint_deg",
+            "waypoints_wait_deg", "place_approach_mm"} <= set(applied)
+    assert math.isclose(cfg.home_joint[1], -math.pi / 2, abs_tol=1e-9)
+    assert math.isclose(cfg.pick_wait_pose[2], 0.525, abs_tol=1e-9)
+    assert len(cfg.waypoints_wait) == 1 and math.isclose(cfg.waypoints_wait[0][0],
+                                                         math.radians(5.0))
+    assert math.isclose(cfg.place_approach_height, 0.080)
+    # 아직 안 가르친 것만 남는다.
+    assert cfg.missing() == ["place_point_pose"]
+
+
+def test_missing_teach_file_is_not_an_error(tmp_path):
+    from elite_robot_controller.tomato import teach_store
+    assert teach_store.load(str(tmp_path / "없는파일.yaml")) == {}
+
+
+def test_scripts_use_plain_lists_not_p_literals():
+    """Elite 스크립트의 pose 는 `p[...]` 가 아니라 그냥 리스트다.
+
+    `p` 는 내장 함수라 `p[...]` 를 보내면 컨트롤러가
+    ``type_error_arg_not_subscriptable`` 로 스크립트를 버린다 —
+    아무 오류 없이 로봇만 안 움직이는 상태가 된다(2026-09-21 CS616 확인).
+    """
+    from elite_robot_controller.tomato import motion
+
+    pose = [0.4, 0.05, 0.4, 3.14, 0.0, 0.0]
+    line = motion.movel(pose, 0.8, 0.25)
+    assert line.startswith("movel([")
+    assert "p[" not in line
+
+    # movej 는 관절값을 받으므로 역기구학을 로봇이 풀게 한다.
+    joint_line = motion.movej_pose(pose, 0.8, 0.25)
+    assert joint_line.startswith("movej(get_inverse_kin([")
+    assert "p[" not in joint_line
+
+    assert motion.movej_joints([0.0] * 6, 1.0, 0.5).startswith("movej([")
+
+
+def test_bridge_result_becomes_the_same_three_topics():
+    """비전 PC 브리지의 result 한 건이 원래 비전 노드와 같은 토픽 3 개가 된다.
+
+    그래야 시퀀스는 비전이 같은 장비든 다른 장비든 똑같이 동작한다.
+    """
+    from elite_robot_controller.tomato.vision_bridge_client import result_to_messages
+
+    result = {
+        "type": "result", "frame_id": "camera_color_optical_frame", "count": 2,
+        "tomatoes": [
+            {"index": 0, "position": {"x": 0.0193, "y": -0.0339, "z": 0.3035},
+             "weight_g": 60.2, "height_m": 0.0386},
+            # 무게·높이가 빠진 토마토도 인덱스가 밀리지 않아야 한다.
+            {"index": 1, "position": {"x": 0.05, "y": 0.01, "z": 0.31},
+             "weight_g": None, "height_m": None},
+        ],
+    }
+    poses, weights, heights = result_to_messages(result)
+    assert poses.header.frame_id == "camera_color_optical_frame"
+    assert len(poses.poses) == 2
+    assert math.isclose(poses.poses[0].position.x, 0.0193)
+    assert list(weights.data)[0] == pytest_approx(60.2)
+    assert len(weights.data) == len(heights.data) == 2
+    assert weights.data[1] == 0.0 and heights.data[1] == 0.0
+
+    # 0 개 검출도 빈 메시지로 그대로 전달한다(로봇이 대기에 매달리지 않게).
+    empty = result_to_messages({"type": "result", "count": 0, "tomatoes": []})
+    assert len(empty[0].poses) == 0 and len(empty[1].data) == 0
+
+
+def pytest_approx(value, tol=1e-4):
+    class _Approx:
+        def __eq__(self, other):
+            return abs(other - value) < tol
+    return _Approx()
+
+
+def test_ui_address_validation():
+    """UI 에 넣은 주소를 검사한다 — 오타가 엉뚱한 곳으로 접속하지 않게."""
+    from elite_robot_controller.tomato import connection
+
+    assert connection.validate_host(" 192.168.1.200 ")[:2] == (True, "192.168.1.200")
+    assert connection.validate_host("nano-desktop.local")[0]
+    for bad in ("", "192.168.1.2000", "192.168.1", "192.168.1.200/24", "http://1.2.3.4", "a b"):
+        ok, _, reason = connection.validate_host(bad)
+        assert not ok and reason, bad
+
+
+def test_ui_remembers_last_addresses(tmp_path):
+    from elite_robot_controller.tomato import connection
+
+    path = str(tmp_path / "connection.yaml")
+    assert connection.load(path) == {}
+    connection.save(path, {"robot_ip": "192.168.1.200", "vision_host": "192.168.1.10",
+                           "unknown": "x"})
+    assert connection.load(path) == {"robot_ip": "192.168.1.200",
+                                     "vision_host": "192.168.1.10"}
+
+
+def test_process_manager_start_log_stop():
+    """패널이 부품을 켜고, 로그를 모으고, 자식까지 확실히 내린다."""
+    import sys
+    import time as _time
+    from elite_robot_controller.tomato.process_manager import ManagedProcess
+
+    # 자식 프로세스를 하나 더 낳는 명령 — 끌 때 그룹 전체가 죽어야 한다.
+    script = ("import subprocess, sys, time;"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+              "print('\\x1b[32mready\\x1b[0m', flush=True);"
+              "print('child', child.pid, flush=True);"
+              "time.sleep(60)")
+    process = ManagedProcess("demo", "데모", [sys.executable, "-c", script])
+    ok, _ = process.start()
+    assert ok and process.running
+    assert not process.start()[0]          # 두 번 켜지 않는다
+
+    deadline = _time.time() + 5
+    while not process.contains("child") and _time.time() < deadline:
+        _time.sleep(0.05)
+    assert process.contains("ready")
+    assert all("\x1b" not in line for line in process.lines)   # 색 코드는 지운다
+    child_pid = int(next(l for l in process.lines if l.startswith("child")).split()[1])
+
+    ok, _ = process.stop(grace_int=2.0)
+    assert ok and not process.running
+    _time.sleep(0.2)
+    import os as _os
+    try:
+        _os.kill(child_pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive, "자식 프로세스가 남았다 — 카메라라면 장치를 못 놓는다"
+
+
+def test_process_manager_reports_failed_exit():
+    import sys
+    import time as _time
+    from elite_robot_controller.tomato.process_manager import ManagedProcess
+
+    process = ManagedProcess("bad", "실패", [sys.executable, "-c",
+                                            "print('Address already in use'); raise SystemExit(3)"])
+    process.start()
+    deadline = _time.time() + 5
+    while process.exit_code is None and _time.time() < deadline:
+        _time.sleep(0.05)
+    assert process.exit_code == 3
+    assert process.contains("Address already in use")
+    # 없는 실행 파일도 노드를 죽이지 않고 실패로 알린다.
+    missing = ManagedProcess("x", "없음", ["/no/such/program"])
+    ok, message = missing.start()
+    assert not ok and "실행 실패" in message
+
+
+
+# ---------------------------------------------------------------------------
+# 벽을 보는 자세 — TCP 기준 이동 (2026-10-13 시퀀스 변경)
+# ---------------------------------------------------------------------------
+def _wall_pose():
+    """TCP z 가 베이스 +X(벽 쪽) 를 보는 자세: RPY (0, 90°, 0)."""
+    from elite_robot_controller.tomato import geometry
+    geometry.set_orientation_format("rpy")
+    return [0.5, 0.1, 0.6, 0.0, math.pi / 2, 0.0]
+
+
+def test_rpy_is_read_as_robot_reports_it():
+    """CS616 이 아래 보기를 (-180, 0, -45) 로 보고한다 — RPY 라면 TCP z 가 베이스 -Z."""
+    from elite_robot_controller.tomato import geometry
+    geometry.set_orientation_format("rpy")
+    z_axis = geometry.tool_axis([0.4, 0.0, 0.5, -math.pi, 0.0, -math.pi / 4])
+    assert [round(v, 6) for v in z_axis] == [0.0, 0.0, -1.0]
+    # +179.97° 와 -180° 는 같은 자세다(예전 회전 벡터 해석에서는 전혀 다른
+    # 자세로 보아 도착 판정이 영영 안 됐을 것이다).
+    a = [0, 0, 0, math.radians(179.97), 0, -0.785]
+    b = [0, 0, 0, -math.pi, 0, -0.785]
+    assert geometry.angle_diff_deg(a, b) < 0.1
+
+
+def test_descend_goes_along_tcp_z_not_base_z():
+    from elite_robot_controller.tomato import plan
+    pose = _wall_pose()
+    down = plan.descend_pose(pose, 0.10)
+    # 벽 쪽(+X)으로 100 mm, 높이(Z)는 그대로.
+    assert math.isclose(down[0], 0.60, abs_tol=1e-9)
+    assert math.isclose(down[2], 0.60, abs_tol=1e-9)
+    assert down[3:] == pose[3:]                 # 자세는 바꾸지 않는다
+
+
+def test_center_and_grip_move_in_tcp_plane():
+    """카메라 중심 맞추기·파지점 정렬은 TCP 의 x·y 평면 — 벽까지 거리는 그대로."""
+    from elite_robot_controller.tomato import plan
+    pose = _wall_pose()
+    # RPY(0,90°,0): TCP x = 베이스 -Z, TCP y = 베이스 +Y
+    centered = plan.center_pose(pose, [0.02, 0.03], "tool")
+    assert math.isclose(centered[0], 0.50, abs_tol=1e-9)    # 벽 쪽으로는 안 움직임
+    assert math.isclose(centered[1], 0.13, abs_tol=1e-9)
+    assert math.isclose(centered[2], 0.58, abs_tol=1e-9)
+    grip = plan.grip_pose(centered, [100.0, 0.0, 0.0], "tool")
+    assert math.isclose(grip[2], 0.48, abs_tol=1e-9)
+    assert math.isclose(grip[0], 0.50, abs_tol=1e-9)
+
+
+def test_descend_distance_from_camera_depth():
+    """거리 = 깊이 + 카메라 앞면(33) - 핑거 끝(172) + 더 들어갈 양(30)."""
+    cfg = pick_config.DescendConfig()
+    assert math.isclose(cfg.travel_mm(300.0), 191.0)
+    fixed = pick_config.DescendConfig(mode="fixed", fixed_mm=120.0)
+    assert fixed.travel_mm(999.0) == 120.0
+
+
+def test_waypoint_path_program_goes_in_order():
+    """경유점을 차례로 거쳐 목표로 — 돌아올 때는 거꾸로 넘겨 받는다."""
+    from elite_robot_controller.tomato import motion
+    w1, w2 = [0.1] * 6, [0.2] * 6
+    home = [0.0] * 6
+    out = motion.joint_path_program("go", [w1, w2], target_joints=[0.3] * 6)
+    back = motion.joint_path_program("back", list(reversed([w1, w2])), target_joints=home)
+    assert out.index("0.100000") < out.index("0.200000") < out.index("0.300000")
+    assert back.index("0.200000") < back.index("0.100000")
+    assert out.startswith("def go():") and out.endswith("end")
+    assert "r=" not in out                       # 기본은 경유점마다 선다
+    assert "r=0.0200" in motion.joint_path_program("b", [w1], target_joints=home, blend=0.02)

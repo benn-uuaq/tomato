@@ -1,0 +1,135 @@
+# 토마토 픽앤플레이스 설정 (Elite CS616 + D435i 비전 + 다이나믹셀 그리퍼)
+#
+# 단위: 위치 mm, 회전 deg, 관절 deg. 로봇 스크립트(m, rad)로는 노드가 환산한다.
+# pose 는 [X, Y, Z, Rx, Ry, Rz] — 펜던트에서 보는 TCP 값을 그대로 넣으면 된다.
+#
+# 홈·대기·놓는 자리·경유점은 여기가 아니라 **UI 의 [위치 가르치기]** 로 정한다.
+# 펜던트로 옮겨 두고 버튼을 누르면 ~/.tomato_pick/taught_poses.yaml 에 저장되고,
+# 그 값이 아래 값보다 우선한다. 비어 있으면 시퀀스가 시작을 거절한다.
+#
+# 작업 순서 (pick_sequence_node.py 머리말과 같다)
+#   1 홈 -> 2 대기(★경유점) -> 3 촬영 -> 4 카메라 중심 맞춤(TCP 기준) -> 5 무게
+#   -> 6 파지점 정렬(TCP 기준) -> 7 하강(TCP +z) -> 8 집기 -> 9 상승(TCP -z)
+#   -> 10 홈(★) -> 11 놓을 자리 위(★) -> 12 감속 하강 -> 13 놓기 -> 14 상승
+#   -> 15 홈(★) -> 16 대기(★) -> [연속이면 3 으로] -> 17 홈(★)
+
+/tomato_pick_sequence:
+  ros__parameters:
+    # --- 대기 자세·놓는 자리 (UI 에서 가르친 값이 있으면 그걸 쓴다) ----
+    pick_wait_pose_mm_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    place_point_pose_mm_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # --- 11~14 단계: 놓기 (상자 위에서 내려놓으므로 베이스 Z 기준) -------
+    # UI 의 [놓기 높이] 에서도 바꿀 수 있다(그 값이 우선).
+    place_approach_mm: 50.0        # 놓는 자리 위 접근 높이
+    place_release_gap_mm: 10.0     # 이만큼 남았을 때 그리퍼를 연다
+
+    # --- 7 단계: 하강 — TCP +z 방향, 고정 Z 한계 없음 ---------------
+    # 벽을 보는 자세에서는 베이스 Z 가 아니라 TCP 가 바라보는 쪽으로 들어간다.
+    # 거리 = 토마토 깊이(카메라) + camera_z_offset - gripper_length + grasp_depth
+    #   예) 깊이 300 -> 300 + 33 - 172 + 30 = 191 mm
+    descend:
+      mode: "vision"               # vision (깊이로 계산) | fixed (fixed_mm 그대로)
+      camera_z_offset_mm: 33.0     # 플랜지 면 -> 카메라 앞면 (README.odt: 8 + 25)
+      gripper_length_mm: 172.0     # 플랜지 면 -> 핑거 끝 (README.odt: 펼친 끝단)
+      grasp_depth_mm: 30.0         # ★ 핑거 끝이 토마토 앞면을 지나 더 들어갈 양
+      fixed_mm: 100.0              # mode 가 fixed 일 때
+      # 안전장치: 계산한 거리가 이보다 길면 하강하지 않고 멈춘다(깊이를
+      # 잘못 쟀을 때 벽으로 밀고 들어가지 않게). 고정 Z 한계와는 다르다.
+      max_travel_mm: 250.0
+
+    # --- 속도 -------------------------------------------------------
+    # 실제 속도 = 아래 값 x 로봇 자체 속도 비율(펜던트 슬라이더).
+    move_speed: 0.25               # 직선 이동 [m/s] (4, 6, 11~14 단계)
+    move_accel: 0.80               # [m/s^2]
+    joint_speed: 0.5               # 관절 이동 [rad/s] (홈·대기·경유점 — 1, 2, 10, 15~17)
+    joint_accel: 1.0               # [rad/s^2]
+    # 경유점에서 멈추지 않고 이 반경 안에서 이어 돈다 [m]. 0 이면 경유점마다
+    # 선다 — 장애물 사이를 지날 때는 0 이 안전하다.
+    waypoint_blend_m: 0.0
+    descend_speed: 0.06            # 7 하강, 9·14 상승 [m/s]
+    place_descend_speed: 0.02      # 12 감속 하강 — 토마토가 눌리지 않게 천천히
+
+    # 로봇이 보고하는 TCP 회전 표기. CS616 은 RPY 로 보인다(아래를 보는 자세를
+    # (-180, 0, -45) 로 보고 — 회전 벡터라면 나올 수 없는 값). 확정은
+    #   python3 tools/check_pose_convention.py 192.168.1.200   (로봇을 움직이지 않음)
+    orientation_format: "rpy"      # rpy | rotvec
+
+    # --- 도착 판정 ---------------------------------------------------
+    pose_tolerance_mm: 2.0
+    angle_tolerance_deg: 2.0
+    joint_tolerance_deg: 0.5       # 관절 이동 도착 판정
+    settle_time_s: 0.3
+    move_timeout_s: 40.0
+
+    # --- 비전 (2, 3, 4 단계) ----------------------------------------
+    # doosan_vision_grasp 의 tomato_area_d435i_v2 노드와 맞춘 값이다.
+    vision:
+      detection_topic: "/tomato/center_positions"   # PoseArray, m, 카메라 optical
+      detection_type: "geometry_msgs/PoseArray"
+      weight_topic: "/tomato/estimated_weights"     # Float32MultiArray, g
+      height_topic: "/tomato/heights"               # Float32MultiArray, m
+      trigger_topic: "/tomato/capture"              # std_msgs/Empty
+      trigger_type: "empty"
+      detection_timeout_s: 10.0
+      # camera_delta: 카메라 X·Y 를 "지금 위치에서 움직일 양"으로 바로 쓴다.
+      # 4 단계는 **TCP 의 x·y 평면**에서 움직인다(align_frame: tool) — 카메라가
+      # 툴에 붙어 있어 벽을 보든 아래를 보든 같은 대응이 맞다.
+      # camera_axis_map 은 카메라 축 -> TCP 축 대응이다. README 의 "(x, y) ->
+      # (-y, -x)" 는 두산·아래 보기에서 잰 값이라 ★ CS616 에서 반드시 확인한다.
+      # 틀리면 두 번째 촬영에서 오차가 줄지 않아 시퀀스가 스스로 멈춘다.
+      detection_frame: "camera_delta"
+      camera_axis_map: ["-y", "-x"]
+      align_frame: "tool"          # tool (TCP x·y) | base (예전, 아래 보기 전용)
+      align_max_step_mm: 100.0     # 이보다 큰 이동은 거절한다
+      axis_check_ratio: 0.7        # 다시 찍은 오차가 첫 오차의 이 비율보다 크면 멈춘다
+      # 중심에 맞춘 뒤 한 번 더 찍는다(그 무게가 정확한 값이다).
+      align_iterations: 1
+      align_tolerance_mm: 5.0
+      # detection_frame 을 "camera" 로 바꿀 때만 쓰는 핸드인아이 변환.
+      # 참고(README): 끝단 중심에서 카메라까지 정면 100.045 mm / 하단 8 mm,
+      # 카메라 두께 25 mm -> 33 mm, 화면 중심은 오른쪽으로 17.5 mm.
+      hand_eye_xyz_mm: [0.0, 0.0, 0.0]
+      hand_eye_rpy_deg: [0.0, 0.0, 0.0]
+
+    # --- 그리퍼 (5, 7, 9 단계) --------------------------------------
+    gripper:
+      backend: "int_topic"         # 다이나믹셀 XD540: /set_pos 로 목표 위치
+      topic: "/set_pos"
+      close_value: 3185            # 파지
+      open_value: 0                # 열기
+      action_wait_s: 1.5           # 동작이 끝날 때까지 기다리는 시간
+      # 카메라 중심에 맞춘 뒤 그리퍼 중심까지 더 갈 양 [mm], **TCP 기준**.
+      # README 의 X 100, Y 32.5 는 두산·아래 보기·베이스 기준 측정값이다 — ★ CS616 의
+      # TCP 축으로 다시 확인한다(README.odt: 카메라는 플랜지에서 정면 100.045 mm,
+      # 화면 중심은 오른쪽 17.5 mm).
+      tcp_offset_mm: [100.0, 32.5, 0.0]
+      offset_frame: "tool"         # tool | base (예전)
+
+/tomato_pick_ui:
+  ros__parameters:
+    ui_host: "0.0.0.0"
+    ui_port: 8080
+
+/gripper_dynamixel:
+  ros__parameters:
+    device: "/dev/ttyUSB0"
+    baudrate: 57600
+    dxl_id: 1
+    command_topic: "/set_pos"
+
+/tomato_area_calculator_d435i_v2:
+  ros__parameters:
+    capture_duration: 1.0          # 1회 촬영 측정 시간 [s]
+    match_dist_px: 60.0            # 같은 토마토로 보는 거리 [px]
+    debug_depth: false
+    # 미리보기 창. "auto" 는 화면이 있을 때만 띄운다 — SSH 로 원격 실행하면
+    # 디스플레이가 없어 Qt 가 그대로 죽기 때문이다(계산·발행은 창과 무관).
+    show_window: "auto"            # auto | "true" | "false"
+
+# 비전 PC(Orin) 조작 패널 — http://<Orin IP>:8081
+/tomato_vision_panel:
+  ros__parameters:
+    ui_port: 8081
+    gripper_close_value: 3185      # [닫기] 버튼 (집기)
+    gripper_open_value: 0          # [열기] 버튼

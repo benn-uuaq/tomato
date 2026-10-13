@@ -1,0 +1,13 @@
+# Jetson(Orin nano)용. torch / torchvision 은 **pip 로 받지 않는다** —
+# NVIDIA 가 배포하는 JetPack 전용 휠을 써야 CUDA 가 붙는다. 그래서
+# ultralytics 도 --no-deps 로 넣고, 순수 파이썬 의존만 여기서 받는다.
+-r common.txt
+pyyaml
+tqdm
+psutil
+py-cpuinfo
+matplotlib
+pillow
+scipy
+pandas
+requests

@@ -1,0 +1,26 @@
+# 빌드 결과 — 장비마다 다시 만든다(빌드한 장비의 절대 경로가 박힌다)
+build/
+install/
+log/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Windows 가 붙이는 다운로드 표시
+*Zone.Identifier
+
+# 원본 자료 — 저장소에 올리지 않는다
+doosan_manipulator.zip
+# README.odt: 장비 비밀번호가 적혀 있다
+README.odt
+# documents/: 내부 계획서
+documents/
+# 오피스 임시 파일
+~$*
+
+# YOLO 모델 가중치 — 올릴지 따로 정한다(장비에는 rsync 로 보낸다)
+models/*.pt
+
+# 로컬 도구 설정
+.claude/

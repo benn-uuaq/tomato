@@ -1,0 +1,3 @@
+# 일반 PC(x86 + CUDA 또는 CPU). torch 를 pip 가 알아서 받는다.
+-r common.txt
+ultralytics==8.4.67

@@ -1,0 +1,7 @@
+# **시스템 파이썬**에 설치한다 (pip install --user).
+#
+# colcon 이 만든 ROS 실행 파일의 shebang 은 빌드할 때의 파이썬(/usr/bin/python3)을
+# 가리킨다. 즉 robot_control_node 같은 ROS 노드는 가상환경이 아니라 시스템
+# 파이썬으로 돈다. 그래서 이 둘은 가상환경이 아니라 시스템 쪽에 있어야 한다.
+pyModbusTCP>=0.2.0        # Elite 컨트롤러 Modbus TCP
+dynamixel-sdk>=3.7.31     # XD540 그리퍼

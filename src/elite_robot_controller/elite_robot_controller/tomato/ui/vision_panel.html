@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>토마토 비전 패널</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --line: #d9dde3; --text: #1d2127;
+    --muted: #6b7280; --accent: #c0392b; --ok: #1e8e3e; --warn: #b26a00; --busy: #1a5fb4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2026; --line:#2e333c; --text:#e8eaed;
+            --muted:#9aa2ae; --accent:#e74c3c; --ok:#4caf50; --warn:#e0a030; --busy:#62a0ea; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text);
+         font-family: system-ui, "Noto Sans KR", sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size:20px; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:14px; margin-bottom:12px; }
+  .overall { font-size:22px; font-weight:700; }
+  .sub { color:var(--muted); font-size:14px; margin-top:4px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:12px; }
+  button { flex:1 1 110px; padding:11px 10px; font-size:15px; font-weight:600;
+           border-radius:8px; border:1px solid var(--line); background:var(--card);
+           color:var(--text); cursor:pointer; }
+  button:hover { border-color:var(--muted); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.primary { background:var(--ok); border-color:var(--ok); color:#fff; }
+  button.danger { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .title { font-weight:700; font-size:15px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:99px; font-size:13px;
+          border:1px solid var(--line); white-space:nowrap; color:var(--muted); }
+  .pill.ready { background:var(--ok); border-color:var(--ok); color:#fff; }
+  .pill.busy { background:var(--busy); border-color:var(--busy); color:#fff; }
+  .pill.starting, .pill.warning, .pill.external { background:var(--warn); border-color:var(--warn); color:#fff; }
+  .pill.error { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .detail { font-size:14px; margin:8px 0 10px; min-height:20px; }
+  .log { font-family: ui-monospace, monospace; font-size:12px; white-space:pre-wrap;
+         color:var(--muted); max-height:180px; overflow:auto; background:var(--bg);
+         border-radius:6px; padding:6px 8px; margin-top:8px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; margin-top:8px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+  th, td { padding:4px; border-bottom:1px solid var(--line); text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .field { display:flex; gap:6px; align-items:center; margin-top:8px; }
+  .field input { flex:1; min-width:0; padding:9px; font-size:15px; border-radius:8px;
+                 border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  .preview { width:100%; border-radius:8px; margin-top:8px; background:#000; display:block; }
+  .note { color:var(--warn); font-size:13px; margin-top:6px; }
+  .reply { font-family: ui-monospace, monospace; font-size:12.5px; color:var(--muted);
+           margin-top:8px; min-height:16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>비전 PC (Orin) &mdash; 토마토 비전 패널</h1>
+
+  <div class="card">
+    <div class="overall" id="overall">--</div>
+    <div class="sub" id="overallSub"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick="post('/all/start')">전체 시작</button>
+      <button class="danger" onclick="post('/all/stop')">전체 중지</button>
+    </div>
+    <div class="reply" id="reply"></div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+</div>
+
+<script>
+// 부품 카드마다 붙는 추가 영역(미리보기, 촬영 결과, 그리퍼 조작)
+const EXTRA = {
+  camera: `
+    <label style="font-size:13px"><input type="checkbox" id="previewOn"
+      onchange="togglePreview()"> 미리보기</label>
+    <img id="preview" class="preview" alt="" hidden>
+    <div class="sub" id="previewMsg"></div>`,
+  vision: `
+    <div class="row"><button id="btnCapture" onclick="post('/capture')">촬영 시험</button></div>
+    <div id="result" class="sub" style="margin-top:8px"></div>`,
+  gripper: `
+    <div class="row">
+      <button id="btnOpen" onclick="gripper(GRIP.open_value)">열기</button>
+      <button id="btnClose" onclick="gripper(GRIP.close_value)">닫기 (집기)</button>
+    </div>
+    <div class="field">
+      <input id="gripPos" type="number" min="0" max="4095" step="1" placeholder="목표 위치 0~4095">
+      <button style="flex:0 0 90px" onclick="gripper(parseInt(document.getElementById('gripPos').value))">이동</button>
+    </div>`,
+  bridge: `<div class="sub" id="bridgeInfo"></div>`,
+};
+let GRIP = {open_value: 0, close_value: 3185};
+let built = false;
+let previewTimer = null;
+
+function esc(s) { return String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+const STATE_TEXT = {ready:'준비됨', busy:'동작 중', starting:'켜는 중', warning:'확인 필요',
+                    error:'문제 있음', external:'패널 밖 실행', stopped:'꺼짐'};
+
+function build(components) {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = components.map(c => `
+    <div class="card" id="card-${c.name}">
+      <div class="head">
+        <span class="title">${esc(c.label)}</span>
+        <span class="pill" id="pill-${c.name}">--</span>
+      </div>
+      <div class="detail" id="detail-${c.name}"></div>
+      <div class="row">
+        <button onclick="post('/component/${c.name}/start')">시작</button>
+        <button onclick="post('/component/${c.name}/stop')">중지</button>
+        <button onclick="post('/component/${c.name}/restart')">재시작</button>
+      </div>
+      <div style="margin-top:10px">${EXTRA[c.name] || ''}</div>
+      <details><summary>로그</summary><div class="log" id="log-${c.name}"></div></details>
+    </div>`).join('');
+  built = true;
+}
+
+async function post(path, body) {
+  const reply = document.getElementById('reply');
+  reply.textContent = '요청 중...';
+  try {
+    const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                                 body: body ? JSON.stringify(body) : undefined});
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+  poll();
+}
+
+function gripper(position) {
+  if (!Number.isInteger(position)) { document.getElementById('reply').textContent = '위치를 숫자로 넣으세요.'; return; }
+  post('/gripper', {position});
+}
+
+function togglePreview() {
+  const on = document.getElementById('previewOn').checked;
+  const img = document.getElementById('preview');
+  img.hidden = !on;
+  clearInterval(previewTimer);
+  if (!on) { document.getElementById('previewMsg').textContent = ''; return; }
+  const refresh = async () => {
+    try {
+      const r = await fetch('/snapshot.jpg?t=' + Date.now());
+      if (r.ok) {
+        img.src = URL.createObjectURL(await r.blob());
+        document.getElementById('previewMsg').textContent = '';
+      } else {
+        document.getElementById('previewMsg').textContent = await r.text();
+      }
+    } catch (e) { /* 다음 주기에 다시 */ }
+  };
+  refresh();
+  previewTimer = setInterval(refresh, 1000);
+}
+
+function render(s) {
+  if (!built) build(s.components);
+  GRIP = s.gripper;
+  document.getElementById('overall').textContent = s.overall.text;
+  document.getElementById('overall').style.color = s.overall.ready ? 'var(--ok)' : 'var(--text)';
+  document.getElementById('overallSub').textContent =
+    '외부 통신 포트 ' + s.bridge.port + (s.bridge.clients.length
+      ? ' · 로봇 PC: ' + s.bridge.clients.map(c => c.split(':')[0]).join(', ')
+      : ' · 로봇 PC 접속 없음');
+
+  for (const c of s.components) {
+    const pill = document.getElementById('pill-' + c.name);
+    pill.className = 'pill ' + c.state;
+    pill.textContent = STATE_TEXT[c.state] || c.state;
+    document.getElementById('detail-' + c.name).textContent = c.detail;
+    const log = document.getElementById('log-' + c.name);
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+    log.textContent = c.log.join('\n') || '(로그 없음)';
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  // 촬영 결과
+  const res = s.result;
+  document.getElementById('result').innerHTML = !res ? '아직 촬영 결과가 없습니다.' :
+    `마지막 결과 (${res.age_s}초 전) — 토마토 ${res.count}개` + (res.count ? `
+     <table><tr><th>#</th><th>X mm</th><th>Y mm</th><th>Z mm</th><th>무게 g</th><th>높이 mm</th></tr>
+     ${res.tomatoes.map(t => `<tr><td>${t.index}</td><td>${t.x_mm}</td><td>${t.y_mm}</td>
+        <td>${t.z_mm}</td><td>${t.weight_g ?? '-'}</td><td>${t.height_mm ?? '-'}</td></tr>`).join('')}
+     </table>` : '');
+  const vision = s.components.find(c => c.name === 'vision');
+  document.getElementById('btnCapture').disabled = !['ready', 'warning'].includes(vision.state);
+
+  // 그리퍼
+  const grip = s.components.find(c => c.name === 'gripper');
+  for (const id of ['btnOpen', 'btnClose']) document.getElementById(id).disabled = !grip.running;
+  document.getElementById('btnOpen').textContent = `열기 (${GRIP.open_value})`;
+  document.getElementById('btnClose').textContent = `닫기 · 집기 (${GRIP.close_value})`;
+
+  // 외부 통신
+  document.getElementById('bridgeInfo').innerHTML = s.bridge.clients.length
+    ? '로봇 PC 가 붙어 있습니다. <span class="note">로봇 작업 중에는 촬영 시험·그리퍼 수동 조작을 하지 마세요.</span>'
+    : `로봇 PC 의 UI 에서 Orin IP 와 함께 [연결] 하면 여기 표시됩니다 (포트 ${s.bridge.port}).`;
+
+  if (!s.preview_available) {
+    const box = document.getElementById('previewOn');
+    if (box) { box.disabled = true; document.getElementById('previewMsg').textContent = '이 장비에서는 미리보기를 쓸 수 없습니다(cv2 없음).'; }
+  }
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/status');
+    render(await r.json());
+  } catch (e) {
+    document.getElementById('overall').textContent = '패널 서버에 연결할 수 없습니다';
+  }
+}
+setInterval(poll, 700);
+poll();
+</script>
+</body>
+</html>

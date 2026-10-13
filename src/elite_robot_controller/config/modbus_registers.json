@@ -1,0 +1,168 @@
+{
+  "_comment": [
+    "Elite CS612 Modbus 레지스터 맵. 주소를 코드에 두지 않고 이 파일에서만 관리한다.",
+    "address가 null인 항목은 주소 미확정을 뜻한다. 노드는 해당 기능을 거부하고,",
+    "UI는 관련 버튼을 비활성화한다. 주소를 확인하면 이 파일만 채우면 된다.",
+    "count는 연속으로 읽고 쓸 레지스터 개수이며, 자세는 [X, Y, Z, Rx, Ry, Rz] 순서다.",
+    "현재 TCP는 로봇 자체 레지스터 384~389를 쓴다. 260~264는 RCS가 작업 시작 전에",
+    "쓰는 입력 칸(반지름·두께·프로브 커버·EOAT 종류)이다. 태스크는 여기에 아무것도",
+    "쓰지 않는다 — 예전에 TCP를 덮어써서 다음 셀이 좌표를 반지름으로 읽었다.",
+    "쓰기 주소는 로봇 태스크가 읽는 범용 레지스터(256~383)에 맞춘다.",
+    "조그와 홈 이동은 레지스터가 아니라 30001 스크립트로 처리하므로 여기에 없다.",
+    "kind는 단위 환산 방법이다. pose는 앞 3개를 위치, 뒤 3개를 회전으로 보고,",
+    "angle은 6개 모두 회전으로 본다. 관절 각도는 6축 전부 mrad이므로 angle이다.",
+    "raw는 값을 그대로 정수로 저장한다(소수점 하위 단위가 없다). work_area가",
+    "여기 해당한다 — app_width/height/overlap 은 mm 그대로이고 scan_h 는 0.1mm 다.",
+    "scan_state(290~299)는 로봇 태스크가 쓰는 진행 상태다. 순서대로",
+    "state, row_idx, rows, alive, zero_ok, finished, pitch, progress, progress2,",
+    "probe_error이며 한 셀의 스캔 완료는 state==5 && finished==1로 판정한다.",
+    "probe_error(299)는 0=정상, 1=probe_c, 2=probe_l, 3=probe_r 접촉 실패, 4=호 길이/반지름이 0 이다 —",
+    "센서판 pc_press/al_press/pr_press가 halt() 직전에 쓴다(dus_init이 0으로",
+    "되돌린다). operator-ui가 이 값이 바뀌는 걸 보고 알람 처리 + MQTT",
+    "evt/error 로 내보낸다(erut_session.raise_error 경로, app.py 참고).",
+    "home_flag(276)은 로봇이 홈에 있는지다(1 홈, 0 벗어남). 태스크의 발행 스레드가",
+    "제어주기마다 관절값을 Home_joint와 비교해 쓰고(TCP가 Home_pose에 있어도 1),",
+    "홈을 떠나는 순간 0이 된다. 태스크가 돌지 않을 때는 이 노드가 대신 관리한다 —",
+    "조그를 보내면 0으로, move_home이 끝나면 1로 쓴다. RCS는 이 값과 task_state를",
+    "둘 다 확인한 뒤에야 차량·리프트를 움직인다(로봇이 홈으로 가는 중에 발판이",
+    "올라가지 않게).",
+    "vehicle_ready(309)는 그 반대 방향의 인터락이다. 차량이 정지하고 아웃트리거",
+    "고정이 끝나고 리프트가 섰다고 RCS가 확인하면 1을 쓰고, 셋 중 하나라도",
+    "움직이기 시작하면 0으로 내린다. 로봇 태스크는 움직이기 전(dus5_init)과",
+    "스캔 직전(dus5_goto_zero)에 이 값이 1이 될 때까지 기다린다(상태 290 = 14).",
+    "약 2분 안에 1이 안 되면 로봇이 299 = 8을 쓰고 멈춘다.",
+    "task_state(500)는 로봇 컨트롤러가 주는 태스크 상태다(1 실행 중, 2 일시 중지,",
+    "3 중지됨). holding이 아니라 input register라 드라이버의 폴백 경로로 읽힌다.",
+    "29999로 상태를 물으면 매번 명령을 던져야 해서 이쪽으로 모니터링한다.",
+    "speed_scale(17)은 로봇 동작 속도 스케일 비율[%] 2~100이다. 읽기 전용으로",
+    "쓰지 않는다 — 설정은 29999 'speed -v N'으로 보낸다. 레지스터에 직접",
+    "써도 먹지만, 제어 경로를 한 곳(29999)으로 모아 두려는 것이다.",
+    "work_area(256~261)는 로봇이 호를 계산하는 데 쓰는 격자 정보다. 순서대로",
+    "  256 호 길이[mm] 257 격자 높이[mm] 258 스캐너 높이[0.1mm]",
+    "0.1mm 를 쓰는 자리(258/260/261/262/263)는 소수가 나오는 값들이다 —",
+    "반지름 834.6, 유효 커버 167.5 처럼. 정수 mm 로 반올림하면 호 모양과",
+    "줄 간격이 눈에 띄게 틀어진다.",
+    "호 모양이 눈에 띄게 틀어진다. kind=raw 라 노드는 값을 그대로 정수로 쓴다 —",
+    "0.1mm 환산은 보내는 쪽(operator-ui)이 미리 곱해서 넣는다.",
+    "  259 최소겹침[mm] 260 반지름[0.1mm]  261 두께[0.1mm]",
+    "  262 프로브 유효 가로[0.1mm]  263 프로브 유효 세로[0.1mm]  (한 번 지날 때 실제 검사되는 커버: 5축 십자 30x30 / 8축 직사각 75x167.5. 세로값이 up 최대 상승량)",
+    "  264 EOAT 종류(eoat_type)  0=없음 5=5축 8=8축",
+    "scan_go(267)는 스캔 시작 허가다. 로봇이 원점에 도착하면 state(290)를 7 로 두고",
+    "여기 1 이 들어올 때까지 멈춰 선다. RCS 는 state 7 을 보고 ERUT 에 도착을 알리고,",
+    "ERUT 가 작업 시작을 보내면 1 을 쓴다. 로봇이 통과하면서 스스로 0 으로 지운다 —",
+    "다음 사이클에 지난 허가가 남아 확인 없이 통과하는 것을 막는다.",
+    "state 8 은 적심(비비기) 구간이다 — 스캔 직전 검사면에 물을 퍼뜨린다.",
+    "mark_target(268~269)은 마킹 자리다. 268 = 원점에서 호를 따라 간 거리 u [mm],",
+    "269 = 원점 높이에서 위로 v [mm]. 마킹 태스크의 dus_mark_point 가 읽는다.",
+    "마킹 태스크 상태(290): 10 이동 중, 11 벽에 붙음(마킹 TODO), 13 홈으로, 12 홈 도착 = 끝.",
+    "299 = 5 는 마킹 자리에서 벽 접촉을 못 찾았다는 뜻이다.",
+    "EOAT 폭만큼 프로브가 퍼져 있어 TCP 는 격자 끝까지 갈 필요가 없다 —",
+    "로봇이 arc_run = 호길이 - EOAT가로 로 실제 이동 거리를 줄인다.",
+    "start_pose(316~321)는 작업면에 붙였을 때의 툴 플랜지 pose 다(티칭한 그대로).",
+    "EOAT 중심 오프셋(펜던트 변수 eoat5_offset / eoat8_offset, [x,y,z] mm)은 로봇",
+    "동작에는 쓰지 않고 스캔 좌표(280~285, 286/287)를 계산할 때만 쓴다.",
+    "속도 비율(307)은 태스크가 더 이상 곱하지 않는다 — 컨트롤러가 29999 'speed -v N'",
+    "으로 받은 비율을 적용한다(스크립트에서 곱하면 셀마다 누적돼 계속 느려졌다)."
+  ],
+  "scale": {
+    "position_per_count": 0.1,
+    "rotation_per_count": 1.0,
+    "_comment": "레지스터 1당 실제 값. 위치는 mm, 회전은 mrad 기준이다."
+  },
+  "read": {
+    "robot_mode": {
+      "address": 66,
+      "count": 1
+    },
+    "control_method": {
+      "address": 71,
+      "count": 1
+    },
+    "operation_mode": {
+      "address": 72,
+      "count": 1
+    },
+    "joint_position": {
+      "address": 73,
+      "count": 6,
+      "kind": "angle"
+    },
+    "tcp_absolute": {
+      "address": 384,
+      "count": 6,
+      "kind": "pose"
+    },
+    "tcp_zero_relative": {
+      "address": 280,
+      "count": 6,
+      "kind": "pose"
+    },
+    "scan_state": {
+      "address": 290,
+      "count": 10,
+      "kind": "raw"
+    },
+    "home_flag": {
+      "address": 276,
+      "count": 1
+    },
+    "task_state": {
+      "address": 500,
+      "count": 1
+    },
+    "speed_scale": {
+      "address": 17,
+      "count": 1
+    }
+  },
+  "write": {
+    "linear_speed": {
+      "address": 306,
+      "count": 1
+    },
+    "speed_ratio": {
+      "address": 307,
+      "count": 1
+    },
+    "pose_src": {
+      "address": 308,
+      "count": 1
+    },
+    "home_joint": {
+      "address": 310,
+      "count": 6,
+      "kind": "angle"
+    },
+    "start_pose": {
+      "address": 316,
+      "count": 6,
+      "kind": "pose"
+    },
+    "work_area": {
+      "address": 256,
+      "count": 9,
+      "kind": "raw"
+    },
+    "param_src": {
+      "address": 266,
+      "count": 1
+    },
+    "scan_go": {
+      "address": 267,
+      "count": 1
+    },
+    "mark_target": {
+      "address": 268,
+      "count": 2,
+      "kind": "raw"
+    },
+    "vehicle_ready": {
+      "address": 309,
+      "count": 1
+    },
+    "home_flag": {
+      "address": 276,
+      "count": 1
+    }
+  }
+}

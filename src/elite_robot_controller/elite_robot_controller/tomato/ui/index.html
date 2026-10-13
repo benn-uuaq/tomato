@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>토마토 픽앤플레이스</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --line: #d9dde3; --text: #1d2127;
+    --muted: #6b7280; --accent: #c0392b; --ok: #1e8e3e; --warn: #b26a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2026; --line:#2e333c; --text:#e8eaed;
+            --muted:#9aa2ae; --accent:#e74c3c; --ok:#4caf50; --warn:#e0a030; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text);
+         font-family: system-ui, "Noto Sans KR", sans-serif; }
+  h1 { font-size:20px; margin:0 0 12px; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:14px; margin-bottom:12px; }
+  .state { font-size:26px; font-weight:700; }
+  .step { font-size:16px; color:var(--muted); margin-top:4px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; }
+  .field { display:flex; flex-direction:column; gap:4px; flex:1 1 200px; }
+  .field label { font-size:13px; color:var(--muted); }
+  .field input { padding:10px; font-size:16px; border-radius:8px; min-width:0;
+                 border:1px solid var(--line); background:var(--bg); color:var(--text);
+                 font-family: ui-monospace, monospace; }
+  .linkline { font-size:14px; margin-top:4px; }
+  .linkline b { display:inline-block; min-width:70px; }
+  button { flex:1 1 130px; padding:12px 10px; font-size:15px; font-weight:600;
+           border-radius:8px; border:1px solid var(--line); background:var(--card);
+           color:var(--text); cursor:pointer; }
+  button:hover { border-color:var(--muted); }
+  button.primary { background:var(--ok); border-color:var(--ok); color:#fff; }
+  button.danger { background:var(--accent); border-color:var(--accent); color:#fff; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  td { padding:5px 4px; border-bottom:1px solid var(--line); }
+  td:first-child { color:var(--muted); width:38%; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:99px; font-size:13px;
+          border:1px solid var(--line); }
+  .pill.on { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .pill.off { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .warn { color:var(--warn); font-size:13px; line-height:1.6; }
+  .log { font-family: ui-monospace, monospace; font-size:12.5px; white-space:pre-wrap;
+         color:var(--muted); max-height:140px; overflow:auto; }
+  .steps li { padding:4px 0; color:var(--muted); font-size:14px; }
+  .steps li.now { color:var(--text); font-weight:700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>토마토 픽앤플레이스 &mdash; Elite CS616</h1>
+
+  <div class="card" id="conncard">
+    <strong style="font-size:14px">연결</strong>
+    <div class="row" style="margin-top:8px">
+      <div class="field">
+        <label for="robotIp">로봇 IP (Elite CS616)</label>
+        <input id="robotIp" inputmode="decimal" autocomplete="off" spellcheck="false"
+               placeholder="192.168.1.200">
+      </div>
+      <div class="field" id="visionField">
+        <label for="visionHost">Orin IP (비전 PC)</label>
+        <input id="visionHost" inputmode="decimal" autocomplete="off" spellcheck="false"
+               placeholder="192.168.1.10">
+      </div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="btnConnect" onclick="connectAll()">연결</button>
+      <button onclick="disconnectAll()">연결 해제</button>
+    </div>
+    <div style="margin-top:10px">
+      <div class="linkline"><b>로봇</b> <span id="robotLink">--</span></div>
+      <div class="linkline" id="visionLine"><b>Orin</b> <span id="visionLink">--</span></div>
+    </div>
+    <div class="log" id="connReply" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <div class="state" id="state">--</div>
+    <div class="step" id="step"></div>
+    <div style="margin-top:10px">
+      <span class="pill" id="conn">로봇 --</span>
+      <span class="pill" id="vlink" hidden>비전 PC --</span>
+      <span class="pill" id="loop">단일 작업</span>
+      <span class="pill" id="cycles">완료 0</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button class="primary" onclick="cmd('start')">작업 시작</button>
+      <button onclick="cmd('start_loop')">연속 시작</button>
+      <button onclick="cmd('pause')">일시 정지</button>
+      <button onclick="cmd('resume')">재개</button>
+      <button class="danger" onclick="cmd('stop')">정지</button>
+    </div>
+    <div class="log" id="reply" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <strong style="font-size:14px">위치 가르치기</strong>
+    <p class="warn" style="margin:6px 0 10px">
+      펜던트로 로봇을 원하는 자리에 옮겨 둔 뒤 누르면 <b>지금 자세·관절값을 읽어
+      저장</b>합니다. 이 버튼들은 로봇을 움직이지 않습니다.
+    </p>
+    <div class="row">
+      <button onclick="cmd('teach_home')">현재 위치 → 홈 자세</button>
+      <button onclick="cmd('teach_wait')">현재 위치 → 대기 자세</button>
+      <button onclick="cmd('teach_place')">현재 위치 → 놓는 자리</button>
+    </div>
+    <table style="margin-top:10px">
+      <tr><td>홈 자세 (관절 deg)</td><td id="cfghome">--</td></tr>
+      <tr><td>대기 자세 (mm, deg)</td><td id="cfgwait">--</td></tr>
+      <tr><td>대기 자세 (관절 deg)</td><td id="cfgwaitj">--</td></tr>
+      <tr><td>놓는 자리 (mm, deg)</td><td id="cfgplace">--</td></tr>
+    </table>
+
+    <div style="margin-top:14px"><strong style="font-size:14px">★ 경유점</strong>
+      <span class="sub" style="font-size:13px; color:var(--muted)">
+        — 홈에서 나가는 순서로 쌓습니다. 돌아올 때는 거꾸로 거칩니다.</span></div>
+    <div class="linkline" style="margin-top:6px"><b>홈 ↔ 대기</b>
+      <span id="wpwait">없음</span></div>
+    <div class="row" style="margin-top:6px">
+      <button onclick="cmd('wp_wait_add')">현재 위치 → 경유점 추가</button>
+      <button onclick="cmd('wp_wait_undo')">마지막 지우기</button>
+      <button onclick="cmd('wp_wait_clear')">모두 지우기</button>
+    </div>
+    <div class="linkline" style="margin-top:10px"><b>홈 ↔ 놓는 자리</b>
+      <span id="wpplace">없음</span></div>
+    <div class="row" style="margin-top:6px">
+      <button onclick="cmd('wp_place_add')">현재 위치 → 경유점 추가</button>
+      <button onclick="cmd('wp_place_undo')">마지막 지우기</button>
+      <button onclick="cmd('wp_place_clear')">모두 지우기</button>
+    </div>
+
+    <div style="margin-top:14px"><strong style="font-size:14px">놓기 높이</strong></div>
+    <div class="row" style="margin-top:6px; align-items:flex-end">
+      <div class="field">
+        <label for="approachMm">놓을 자리 위 접근 높이 (mm)</label>
+        <input id="approachMm" type="number" min="5" max="500" step="1">
+      </div>
+      <div class="field">
+        <label for="gapMm">그리퍼 여는 높이 — 남은 거리 (mm)</label>
+        <input id="gapMm" type="number" min="0" max="499" step="1">
+      </div>
+      <button style="flex:0 0 120px" onclick="saveSettings()">저장</button>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button onclick="if (confirm('가르친 값을 모두 지울까요?')) cmd('teach_clear')">가르친 값 모두 지우기</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <tr><td>현재 TCP [mm, deg]</td><td id="tcp">--</td></tr>
+      <tr><td>현재 관절 [deg]</td><td id="joints">--</td></tr>
+      <tr><td>대상 토마토 (카메라 mm)</td><td id="target">--</td></tr>
+      <tr><td>높이 / 무게</td><td id="size">--</td></tr>
+      <tr><td>카메라 중심 오차</td><td id="residual">--</td></tr>
+      <tr><td>깊이 → TCP +z 하강</td><td id="travel">--</td></tr>
+      <tr><td>최근 알람</td><td id="alarm">--</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <strong style="font-size:14px">작업 시퀀스</strong>
+    <ul class="steps" id="steps"></ul>
+  </div>
+
+  <div class="card" id="missingcard" hidden>
+    <strong style="font-size:14px">아직 설정되지 않은 값</strong>
+    <div class="warn" id="missing"></div>
+  </div>
+</div>
+
+<script>
+// 단계 순서와 이름은 시퀀스 노드가 보내 준다(pick/status 의 order).
+let ORDER = [];
+let LABELS = {};
+let settingsFilled = false;
+
+async function saveSettings() {
+  const reply = document.getElementById('reply');
+  try {
+    const r = await fetch('/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        place_approach_mm: parseFloat(document.getElementById('approachMm').value),
+        place_release_gap_mm: parseFloat(document.getElementById('gapMm').value),
+      }),
+    });
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+}
+
+function wpText(list) {
+  if (!list || !list.length) return '없음';
+  return list.length + '개 — ' + list.map((p, i) => `#${i + 1} [${p.join(', ')}]`).join('  ');
+}
+
+let addressesFilled = false;
+
+async function connectAll() {
+  const btn = document.getElementById('btnConnect');
+  const reply = document.getElementById('connReply');
+  btn.disabled = true;
+  reply.textContent = '연결 중... (로봇이 응답하지 않으면 몇 초 걸립니다)';
+  try {
+    const r = await fetch('/connect', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        robot_ip: document.getElementById('robotIp').value,
+        vision_host: document.getElementById('visionHost').value,
+      }),
+    });
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+  btn.disabled = false;
+}
+
+async function disconnectAll() {
+  const reply = document.getElementById('connReply');
+  try {
+    const r = await fetch('/disconnect', {method: 'POST'});
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+}
+
+function renderConnection(s) {
+  const c = s.connection || {};
+  // 처음 한 번만 채운다 — 입력하는 중에 덮어쓰지 않게.
+  if (!addressesFilled && c.robot_ip !== undefined) {
+    document.getElementById('robotIp').value = c.robot_ip || '';
+    document.getElementById('visionHost').value = c.vision_host || '';
+    addressesFilled = true;
+  }
+  const robot = document.getElementById('robotLink');
+  robot.textContent = s.connected ? '연결됨' : '끊김';
+  robot.style.color = s.connected ? 'var(--ok)' : 'var(--accent)';
+
+  // 비전이 같은 장비면(브리지 없음) Orin 칸을 숨긴다.
+  document.getElementById('visionField').hidden = !c.has_bridge;
+  document.getElementById('visionLine').hidden = !c.has_bridge;
+  const vs = c.vision_state || {};
+  const vision = document.getElementById('visionLink');
+  const phase = {connected: '연결됨', connecting: '연결 중...', idle: '대기 ([연결] 을 누르세요)',
+                 error: '실패 — ' + (vs.error || '') + ' (다시 시도 중)'};
+  vision.textContent = phase[vs.phase] || '--';
+  vision.style.color = vs.phase === 'connected' ? 'var(--ok)'
+                     : vs.phase === 'error' ? 'var(--accent)' : 'var(--muted)';
+}
+
+async function cmd(name) {
+  const reply = document.getElementById('reply');
+  reply.textContent = '요청 중: ' + name;
+  try {
+    const r = await fetch('/command/' + name, {method: 'POST'});
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+}
+
+function renderSteps(state) {
+  const ul = document.getElementById('steps');
+  if (ul.childElementCount !== ORDER.length) {
+    ul.innerHTML = '';
+    ORDER.forEach(k => {
+      const li = document.createElement('li');
+      li.id = 'st-' + k;
+      li.textContent = LABELS[k] || k;
+      ul.appendChild(li);
+    });
+  }
+  ORDER.forEach(k => {
+    const li = document.getElementById('st-' + k);
+    if (li) li.className = (k === state) ? 'now' : '';
+  });
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/status');
+    const s = await r.json();
+    if (s.labels) LABELS = s.labels;
+    if (s.order) { ORDER = s.order.map(o => o[0]); s.order.forEach(o => LABELS[o[0]] = o[1]); }
+    renderConnection(s);
+    document.getElementById('state').textContent = s.step || s.state || '--';
+    document.getElementById('step').textContent = s.message || '';
+    const conn = document.getElementById('conn');
+    conn.textContent = s.connected ? '로봇 연결됨' : '로봇 끊김';
+    conn.className = 'pill ' + (s.connected ? 'on' : 'off');
+    // 비전이 다른 장비(Orin)일 때만 보인다. null 이면 같은 장비라 숨긴다.
+    const vlink = document.getElementById('vlink');
+    if (s.vision_link === null || s.vision_link === undefined) {
+      vlink.hidden = true;
+    } else {
+      vlink.hidden = false;
+      vlink.textContent = s.vision_link ? '비전 PC 연결됨' : '비전 PC 끊김';
+      vlink.className = 'pill ' + (s.vision_link ? 'on' : 'off');
+    }
+    document.getElementById('loop').textContent = s.loop ? '연속 운전' : '단일 작업';
+    document.getElementById('cycles').textContent = '완료 ' + (s.cycles || 0);
+    document.getElementById('tcp').textContent = s.tcp_mm_deg ? s.tcp_mm_deg.join(', ') : '--';
+    document.getElementById('joints').textContent = s.joints_deg ? s.joints_deg.join(', ') : '--';
+    const t = s.target;
+    document.getElementById('target').textContent =
+      t ? `#${t.index}  x ${t.x_mm}  y ${t.y_mm}  z ${t.z_mm}` : '--';
+    document.getElementById('travel').textContent =
+      (s.travel_mm === null || s.travel_mm === undefined) ? '--'
+        : `깊이 ${s.depth_mm} mm → ${s.travel_mm} mm`;
+    document.getElementById('size').textContent =
+      t ? `${t.height_mm} mm / ${t.weight_g} g` : '--';
+    document.getElementById('residual').textContent =
+      (s.residual_mm === null || s.residual_mm === undefined)
+        ? '--' : `${s.residual_mm} mm (촬영 ${s.captures || 0}회)`;
+    document.getElementById('alarm').textContent = s.alarm || '--';
+    const c = s.config || {};
+    const taught = s.taught || {};
+    const mark = (key) => (key in taught) ? ' (가르침)' : ' (설정파일)';
+    document.getElementById('cfghome').textContent =
+      c.home_joint ? c.home_joint.join(', ') : '-- (가르쳐야 시작할 수 있습니다)';
+    document.getElementById('cfgwait').textContent =
+      c.pick_wait_pose ? c.pick_wait_pose.join(', ') + mark('pick_wait_pose_mm_deg') : '--';
+    document.getElementById('cfgwaitj').textContent =
+      c.pick_wait_joint ? c.pick_wait_joint.join(', ')
+                        : (c.pick_wait_pose ? '없음 — 로봇이 자세로 역기구학 계산 (다시 가르치면 저장됨)' : '--');
+    document.getElementById('cfgplace').textContent =
+      c.place_point_pose ? c.place_point_pose.join(', ') + mark('place_point_pose_mm_deg') : '--';
+    document.getElementById('wpwait').textContent = wpText(c.waypoints_wait);
+    document.getElementById('wpplace').textContent = wpText(c.waypoints_place);
+    if (!settingsFilled && c.place_approach_mm !== undefined) {
+      document.getElementById('approachMm').value = c.place_approach_mm;
+      document.getElementById('gapMm').value = c.place_release_gap_mm;
+      settingsFilled = true;
+    }
+    renderSteps(s.state);
+    const card = document.getElementById('missingcard');
+    if (s.missing && s.missing.length) {
+      card.hidden = false;
+      document.getElementById('missing').textContent = '· ' + s.missing.join('\n· ');
+    } else { card.hidden = true; }
+  } catch (e) { /* 노드가 잠깐 멈춰도 화면은 유지한다 */ }
+}
+setInterval(poll, 300);
+poll();
+</script>
+</body>
+</html>
