@@ -4,19 +4,20 @@ Orin nano 는 화면 없이 쓰는 일이 많아 **브라우저에서 여는 형
 파이썬 표준 라이브러리의 HTTP 서버만 쓰므로 의존이 늘지 않고, 같은 네트워크의
 노트북이나 태블릿에서도 열 수 있다.
 
-    ros2 run elite_robot_controller pick_ui_node
-    # 브라우저에서 http://<로봇 PC IP>:8080
+    ./robot_run.sh
+    # 브라우저에서 http://<Orin IP>:8080   (Orin 화면에는 창이 자동으로 뜬다)
 
 UI 는 `pick/status` 를 그대로 보여주고, 버튼은 `pick/*` 서비스를 부른다.
 
-연결도 UI 에서 한다. 로봇 IP 와 Orin IP 를 넣고 [연결] 을 누르면
-1. 두 노드의 주소 파라미터를 바꾸고 (`robot_control_node.robot_ip`,
-   `vision_bridge_client.host`)
-2. 각자의 connect 서비스를 부른다.
-마지막에 쓴 주소는 `~/.tomato_pick/connection.yaml` 에 남겨 다음에 미리 채운다.
+연결도 UI 에서 한다. 로봇 IP 를 넣고 [연결] 을 누르면 `robot_control_node.robot_ip`
+를 바꾸고 connect 서비스를 부른다. 마지막에 쓴 주소는 `~/.tomato_pick/connection.yaml`
+에 남겨 다음에 미리 채운다.
 
-[비전 시작] / [비전 정지] 는 Orin 쪽을 켜고 끈다(`vision_remote`). Orin 에 가서
-`vision_run.sh` 를 따로 칠 필요가 없다 — 로봇 PC 에서는 `robot_run.sh` 하나면 된다.
+[비전 시작] / [비전 정지] 는 비전 패널(:8081, 같은 장비)에 카메라·YOLO·그리퍼를
+켜고 끄라고 한다(`vision_remote`).
+
+두 대로 나눠 쓸 때(브리지 클라이언트가 떠 있을 때)만 Orin IP 칸이 생기고, [연결] 이
+브리지(`vision_bridge_client.host`)도 붙이며, [비전 시작] 은 그 Orin 의 패널을 부른다.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rcl_interfaces.srv import SetParameters
 from rclpy.parameter import Parameter
@@ -85,7 +86,7 @@ class PickUiNode(Node):
         #: True 면 띄우자마자 기억해 둔 주소로 [연결] 을 누른 것처럼 한다
         #: (robot_run.sh --connect). 다른 노드가 뜰 때까지 잠깐 기다렸다가 건다.
         self.declare_parameter("connect_on_start", False)
-        # [비전 시작] — Orin 의 비전 패널(HTTP) 이 없으면 SSH(키 인증) 로 vision_run.sh 를 띄운다.
+        # [비전 시작] — 비전 패널(HTTP) 이 없으면 vision_run.sh 를 띄운다(두 대로 나눴으면 SSH, 키 인증).
         self.declare_parameter("orin_user", os.environ.get("ORIN_USER", "nano"))
         self.declare_parameter("orin_workspace", os.environ.get("ORIN_WS", "~/tomato_ws"))
         self.declare_parameter("vision_panel_port", 8081)
@@ -103,7 +104,7 @@ class PickUiNode(Node):
             user=str(self.get_parameter("orin_user").value),
             workspace=str(self.get_parameter("orin_workspace").value),
             panel_port=int(self.get_parameter("vision_panel_port").value))
-        self.vision_panel = summarize(None)     # Orin 비전 패널 상태(요약)
+        self.vision_panel = summarize(None)     # 비전 패널 상태(요약)
         self.vision_action = ""                 # 마지막 [비전 시작/정지] 결과 문구
         self._vision_busy = threading.Lock()    # 버튼을 연달아 눌러도 한 번만
 
@@ -277,9 +278,14 @@ class PickUiNode(Node):
             "message": " / ".join(value["message"] for value in results.values()),
         }
 
-    # ------------------------------------------------------------ Orin 비전 켜기/끄기
+    # ------------------------------------------------------------ 비전 켜기/끄기
     def _vision_host(self, body: dict) -> tuple:
-        """화면에 넣은 Orin IP 를 검사하고 기억한다. (ok, host 또는 사유)"""
+        """비전 패널이 있는 곳. 한 대면 이 장비, 두 대로 나눴으면 화면의 Orin IP.
+
+        Orin IP 는 검사하고 기억한다. (ok, host 또는 사유)
+        """
+        if not self.has_bridge:
+            return True, "127.0.0.1"
         ok, value, reason = connection.validate_host(
             body.get("vision_host") or self.addresses["vision_host"])
         if not ok:
@@ -293,18 +299,16 @@ class PickUiNode(Node):
         return True, value
 
     def vision_start(self, body: dict) -> dict:
-        """[비전 시작] — Orin 의 카메라·비전·그리퍼·외부 통신을 켜고, 브리지를 그쪽에 붙인다."""
-        if not self.has_bridge:
-            return {"success": False, "message": "비전이 이 장비에 있어(브리지 없음) Orin 을 켤 일이 없습니다."}
+        """[비전 시작] — 카메라·YOLO·그리퍼를 켠다. 두 대로 나눴으면 브리지도 그쪽에 붙인다."""
         ok, host = self._vision_host(body)
         if not ok:
             return {"success": False, "message": host}
         if not self._vision_busy.acquire(blocking=False):
-            return {"success": False, "message": "이미 Orin 비전을 켜는 중입니다."}
+            return {"success": False, "message": "이미 비전을 켜는 중입니다."}
         try:
-            self.vision_action = f"Orin({host}) 비전을 켜는 중..."
+            self.vision_action = f"{self.remote.where(host)} 비전을 켜는 중..."
             result = self.remote.start(host)
-            if result["success"]:
+            if result["success"] and self.has_bridge:
                 # 브리지 서버가 뜰 때까지 2초마다 다시 붙으므로 지금 걸어 두면 된다.
                 ok, reason = self._set_param("vision", "host", host)
                 link = (self._trigger("vision", "connect", 3.0) if ok else
@@ -319,9 +323,7 @@ class PickUiNode(Node):
             self._vision_busy.release()
 
     def vision_stop(self, body: dict) -> dict:
-        """[비전 정지] — Orin 패널이 켠 것만 내린다. 작업 중이면 막는다."""
-        if not self.has_bridge:
-            return {"success": False, "message": "비전이 이 장비에 있어(브리지 없음) Orin 을 끌 일이 없습니다."}
+        """[비전 정지] — 비전 패널이 켠 것만 내린다. 작업 중이면 막는다."""
         state = self.status.get("state", "IDLE")
         if state not in IDLE_STATES:
             return {"success": False,
@@ -330,7 +332,7 @@ class PickUiNode(Node):
         if not ok:
             return {"success": False, "message": host}
         result = self.remote.stop(host)
-        if result["success"]:
+        if result["success"] and self.has_bridge:
             # 일부러 끈 것이니 "접속 실패 — 다시 시도 중" 을 띄우지 않게 브리지도 쉰다.
             link = self._trigger("vision", "disconnect", 3.0)
             self.last_connect["vision"] = link["message"]
@@ -339,13 +341,11 @@ class PickUiNode(Node):
         return result
 
     def _watch_vision_panel(self):
-        """Orin 비전 패널의 상태를 계속 읽어 화면에 보여 준다(브리지가 있을 때만)."""
+        """비전 패널의 상태를 계속 읽어 화면에 보여 준다."""
         import time
         while rclpy.ok():
-            if not self.has_bridge:
-                time.sleep(1.0)
-                continue
-            status = self.remote.panel_status(self.addresses["vision_host"], timeout=1.5)
+            host = self.addresses["vision_host"] if self.has_bridge else "127.0.0.1"
+            status = self.remote.panel_status(host, timeout=1.5)
             self.vision_panel = summarize(status)
             time.sleep(1.0 if status else 2.0)
 
@@ -377,7 +377,8 @@ class PickUiNode(Node):
             "last": self.last_connect,
         }
         data["vision_panel"] = dict(self.vision_panel, action=self.vision_action,
-                                    starting=self._vision_busy.locked())
+                                    starting=self._vision_busy.locked(),
+                                    port=self.remote.panel_port)
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     def _make_handler(node_self):
@@ -459,11 +460,12 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # Ctrl+C
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>비전 PC (Orin) &mdash; 토마토 비전 패널</h1>
+  <h1>토마토 비전 패널</h1>
 
   <div class="card">
     <div class="overall" id="overall">--</div>
@@ -166,8 +166,10 @@ function render(s) {
   GRIP = s.gripper;
   document.getElementById('overall').textContent = s.overall.text;
   document.getElementById('overall').style.color = s.overall.ready ? 'var(--ok)' : 'var(--text)';
-  document.getElementById('overallSub').textContent =
-    '외부 통신 포트 ' + s.bridge.port + (s.bridge.clients.length
+  // 외부 통신(브리지)은 로봇 PC 가 따로 있을 때(두 대로 나눌 때)만 있다.
+  document.getElementById('overallSub').textContent = !s.bridge.enabled
+    ? '로봇 작업 중에는 촬영 시험·그리퍼 수동 조작을 하지 마세요.'
+    : '외부 통신 포트 ' + s.bridge.port + (s.bridge.clients.length
       ? ' · 로봇 PC: ' + s.bridge.clients.map(c => c.split(':')[0]).join(', ')
       : ' · 로봇 PC 접속 없음');
 
@@ -199,8 +201,9 @@ function render(s) {
   document.getElementById('btnOpen').textContent = `열기 (${GRIP.open_value})`;
   document.getElementById('btnClose').textContent = `닫기 · 집기 (${GRIP.close_value})`;
 
-  // 외부 통신
-  document.getElementById('bridgeInfo').innerHTML = s.bridge.clients.length
+  // 외부 통신 (두 대로 나눌 때만)
+  const bridgeInfo = document.getElementById('bridgeInfo');
+  if (bridgeInfo) bridgeInfo.innerHTML = s.bridge.clients.length
     ? '로봇 PC 가 붙어 있습니다. <span class="note">로봇 작업 중에는 촬영 시험·그리퍼 수동 조작을 하지 마세요.</span>'
     : `로봇 PC 의 UI 에서 Orin IP 와 함께 [연결] 하면 여기 표시됩니다 (포트 ${s.bridge.port}).`;
 

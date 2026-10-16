@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, Float32MultiArray, String
@@ -863,11 +864,12 @@ def main(args=None):
     node = PickSequenceNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # Ctrl+C
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

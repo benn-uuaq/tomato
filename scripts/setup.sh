@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# 워크스페이스 한 번 준비하기 — 비전 PC(Orin) / 로봇 PC(WSL) 공용.
+# 워크스페이스 한 번 준비하기.
 #
-#   bash scripts/setup.sh            # 역할은 장비를 보고 정한다
-#   TOMATO_ROLE=all bash scripts/setup.sh   # 한 대에서 전부 돌릴 때
+#   bash scripts/setup.sh            # 한 대(Orin)에서 전부 — 기본
+#   TOMATO_ROLE=pc bash scripts/setup.sh    # (두 대로 나눌 때) 로봇 PC
 #
 # 역할 (scripts/env.sh 와 같은 규칙)
-#   orin : Jetson 이면 자동. 카메라·YOLO·그리퍼 — 가상환경과 YOLO 의존을 깐다
-#   pc   : 그 외. 로봇·시퀀스·UI — **가상환경도 torch 도 깔지 않는다**
-#   all  : 한 대에서 전부
+#   all    : 기본. 로봇·UI + 카메라·YOLO·그리퍼 — 가상환경과 YOLO 의존을 깐다
+#   vision : 비전 쪽만 (all 과 같이 준비)
+#   orin   : (두 대로 나눌 때) 비전 PC (all 과 같이 준비)
+#   pc     : (두 대로 나눌 때) 로봇 PC — **가상환경도 torch 도 깔지 않는다**
 #
 # 하는 일
 #   0. 다른 장비에서 빌드된 install/ 정리
@@ -15,7 +16,7 @@
 #   2. (orin/all) 가상환경 + YOLO 의존
 #   3. colcon build
 #   4. 폴더에 들어오면 환경이 자동으로 잡히게 (direnv 가 있으면 direnv, 없으면 ~/.bashrc 훅)
-#   5. 주변 확인 (orin: 카메라·그리퍼·모델 / pc: 로봇·비전 PC 도달)
+#   5. 주변 확인 (로봇 도달, 카메라·그리퍼·모델 / pc: 로봇·비전 PC 도달)
 #
 # 이미 되어 있는 것은 건너뛰므로 몇 번 돌려도 안전하다.
 # set -u 는 쓰지 않는다 — ROS 의 setup.bash 가 선언되지 않은 변수를 참조해 죽는다.
@@ -24,12 +25,10 @@ WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$WS/venv"
 
 is_jetson() { [ -f /etc/nv_tegra_release ] || grep -qi tegra /proc/version 2>/dev/null; }
-if [ -z "${TOMATO_ROLE:-}" ]; then
-    if is_jetson; then TOMATO_ROLE=orin; else TOMATO_ROLE=pc; fi
-fi
+TOMATO_ROLE="${TOMATO_ROLE:-all}"
 case "$TOMATO_ROLE" in
-    orin|pc|all) ;;
-    *) echo "TOMATO_ROLE 은 orin / pc / all 중 하나여야 합니다: $TOMATO_ROLE"; exit 1 ;;
+    all|vision|orin|pc) ;;
+    *) echo "TOMATO_ROLE 은 all / vision / orin / pc 중 하나여야 합니다: $TOMATO_ROLE"; exit 1 ;;
 esac
 
 echo "=== 토마토 수확 워크스페이스 준비 ==="
@@ -169,6 +168,13 @@ if [ "$TOMATO_ROLE" = "pc" ]; then
         echo "      (Orin 에서 ./run.sh 를 띄운 뒤에 열립니다)."
     fi
 else
+    if [ "$TOMATO_ROLE" = "all" ]; then
+        if ping -c 1 -W 2 "$ROBOT_IP" >/dev/null 2>&1; then
+            echo "    로봇 $ROBOT_IP — 응답 있음"
+        else
+            echo "    ※ 로봇 $ROBOT_IP 에 닿지 않습니다 — 랜선과 유선 주소(192.168.1.x/24)를 확인하세요."
+        fi
+    fi
     if ! ros2 pkg prefix realsense2_camera >/dev/null 2>&1; then
         echo "    ※ realsense2_camera 가 없습니다: sudo apt install ros-humble-realsense2-camera"
     fi

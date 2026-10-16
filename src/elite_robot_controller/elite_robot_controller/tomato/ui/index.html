@@ -81,9 +81,11 @@
     <div class="log" id="connReply" style="margin-top:6px"></div>
 
     <div id="visionBox" style="margin-top:14px; border-top:1px solid var(--line); padding-top:12px">
-      <strong style="font-size:14px">Orin 비전</strong>
+      <strong style="font-size:14px">비전</strong>
       <span style="font-size:13px; color:var(--muted)">
-        — 카메라·비전·그리퍼·외부 통신. Orin 에서 vision_run.sh 를 따로 켜지 않아도 됩니다.</span>
+        — 카메라·YOLO·그리퍼를 켜고 끕니다.
+        <a id="panelLink" href="#" target="_blank" rel="noopener">비전 패널 열기</a>
+        (미리보기·촬영 시험·그리퍼 수동)</span>
       <div class="row" style="margin-top:8px">
         <button class="primary" id="btnVisionStart" onclick="visionCmd('start')">비전 시작</button>
         <button id="btnVisionStop" onclick="visionCmd('stop')">비전 정지</button>
@@ -242,10 +244,10 @@ async function connectAll() {
 
 async function visionCmd(action) {
   const reply = document.getElementById('visionReply');
-  if (action === 'stop' && !confirm('Orin 의 카메라·비전·그리퍼·외부 통신을 끌까요?')) return;
+  if (action === 'stop' && !confirm('카메라·YOLO·그리퍼를 끌까요?')) return;
   reply.textContent = action === 'start'
-    ? 'Orin 비전을 켜는 중... (Orin 이 꺼져 있으면 SSH 로 vision_run.sh 를 띄웁니다)'
-    : 'Orin 비전을 끄는 중...';
+    ? '비전을 켜는 중... (카메라·모델이 올라오는 데 20~60 초)'
+    : '비전을 끄는 중...';
   try {
     const r = await fetch('/vision/' + action, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -262,15 +264,16 @@ const PART_STATE = {ready: ['준비됨', 'on'], busy: ['동작 중', 'on'], star
 function renderVisionPanel(s) {
   const c = s.connection || {};
   const v = s.vision_panel || {};
-  document.getElementById('visionBox').hidden = !c.has_bridge;
-  if (!c.has_bridge) return;
+  // 비전 패널은 한 대면 이 장비, 두 대로 나눴으면 Orin 에 있다.
+  const panelHost = c.has_bridge ? (c.vision_host || location.hostname) : location.hostname;
+  document.getElementById('panelLink').href = `http://${panelHost}:${v.port || 8081}`;
   const overall = document.getElementById('visionOverall');
   overall.textContent = v.text || '--';
   overall.style.color = v.ready ? 'var(--ok)' : v.reachable ? 'var(--text)' : 'var(--muted)';
   document.getElementById('visionParts').innerHTML = (v.components || []).map(p => {
     const [text, cls] = PART_STATE[p.state] || [p.state, ''];
     return `<span class="pill ${cls}" title="${(p.detail || '').replace(/"/g, '&quot;')}">`
-         + `${p.label} · ${text}${p.external ? ' (Orin 에서 직접 켬)' : ''}</span> `;
+         + `${p.label} · ${text}${p.external ? ' (터미널에서 직접 켬)' : ''}</span> `;
   }).join('');
   document.getElementById('btnVisionStart').disabled = !!v.starting;
   document.getElementById('btnVisionStop').disabled = !!v.starting || !v.reachable;

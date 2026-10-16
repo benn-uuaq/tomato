@@ -419,7 +419,7 @@ def test_bridge_server_knows_the_same_sources():
 
 
 def test_vision_remote_ssh_command_is_key_only():
-    """[비전 시작] 의 SSH 는 비밀번호를 기다리지 않고, `~/` 는 원격 홈으로 푼다."""
+    """(두 대로 나눌 때) SSH 는 비밀번호를 기다리지 않고, `~/` 는 원격 홈으로 푼다."""
     from elite_robot_controller.tomato import vision_remote
 
     cmd = vision_remote.ssh_command("nano", "192.168.1.10", "~/tomato_ws", "echo hi")
@@ -429,8 +429,20 @@ def test_vision_remote_ssh_command_is_key_only():
     assert "vision_run.sh --no-window" in vision_remote.START_REMOTE
 
 
-def test_vision_remote_uses_panel_then_falls_back_to_ssh(tmp_path, monkeypatch):
-    """패널(:포트) 이 떠 있으면 HTTP 로 켜고, 없으면 SSH 로 vision_run.sh 를 띄운다."""
+def test_vision_remote_same_machine_needs_no_ssh():
+    """한 대에서 다 돌리면 패널은 이 장비 — vision_run.sh 를 SSH 없이 띄운다."""
+    from elite_robot_controller.tomato import vision_remote
+
+    remote = vision_remote.VisionRemote(local_workspace="/home/nano/tomato_ws")
+    cmd = remote.launch_command("127.0.0.1")
+    assert cmd[:2] == ["bash", "-c"] and "ssh" not in cmd
+    assert cmd[2].startswith("cd /home/nano/tomato_ws && ")
+    assert remote.where("localhost") == "이 PC"
+    assert remote.launch_command("192.168.1.10")[0] == "ssh"
+
+
+def test_vision_remote_uses_panel_then_falls_back_to_launch(tmp_path, monkeypatch):
+    """패널(:포트) 이 떠 있으면 HTTP 로 켜고, 없으면 vision_run.sh 를 띄운다(다른 장비면 SSH)."""
     import json
     import os
     import socket
@@ -471,7 +483,7 @@ def test_vision_remote_uses_panel_then_falls_back_to_ssh(tmp_path, monkeypatch):
     finally:
         server.shutdown()
 
-    # 패널이 없는 포트 -> 가짜 ssh 가 불린다.
+    # 패널이 없는 다른 장비(127.0.0.2 — 같은 PC 로 보지 않는 루프백) -> 가짜 ssh 가 불린다.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         free_port = probe.getsockname()[1]
@@ -481,14 +493,25 @@ def test_vision_remote_uses_panel_then_falls_back_to_ssh(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     remote = vision_remote.VisionRemote(user="nano", panel_port=free_port)
-    assert remote.panel_status("127.0.0.1") is None
+    assert remote.panel_status("127.0.0.2") is None
     assert not vision_remote.summarize(None)["reachable"]
-    result = remote.start("127.0.0.1")
+    result = remote.start("127.0.0.2")
     assert result["success"], result
-    assert "nano@127.0.0.1" in log.read_text() and "vision_run.sh" in log.read_text()
+    assert "nano@127.0.0.2" in log.read_text() and "vision_run.sh" in log.read_text()
 
     # 키가 등록되지 않았으면 그 이유와 고칠 명령을 알려 준다.
     fake.write_text('#!/bin/sh\necho "nano@x: Permission denied (publickey,password)." >&2\nexit 255\n')
-    result = remote.start("127.0.0.1")
-    assert not result["success"] and "ssh-copy-id nano@127.0.0.1" in result["message"]
-    assert not remote.stop("127.0.0.1")["success"]     # 패널이 없으면 끌 것도 없다
+    result = remote.start("127.0.0.2")
+    assert not result["success"] and "ssh-copy-id nano@127.0.0.2" in result["message"]
+    assert not remote.stop("127.0.0.2")["success"]     # 패널이 없으면 끌 것도 없다
+
+
+def test_vision_panel_ignores_its_own_parents():
+    """한 대에서 다 돌리면 부모 ros2 launch 의 명령줄에 비전 런치 이름이 들어 있다 —
+    그것을 "패널 밖에서 떠 있는 비전 노드" 로 잘못 보면 [비전 시작] 이 아무것도 안 켠다."""
+    import os
+
+    from elite_robot_controller.tomato.vision_panel import VisionPanelNode
+
+    mine = VisionPanelNode._ancestors()
+    assert os.getpid() in mine and os.getppid() in mine

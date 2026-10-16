@@ -1,38 +1,46 @@
 # 토마토 수확 워크스페이스 (Elite CS616 + D435i + 다이나믹셀 그리퍼)
 
-비전과 로봇을 **두 장비로 나눠** 돌린다. 두 장비는 랜선으로만 이어지고, 같은
-폴더를 양쪽에 두고 장비마다 스크립트 하나만 실행한다.
+**한 대(Orin nano)에서 전부** 돌린다. 카메라·그리퍼는 Orin 에 USB 로, 로봇은 랜선으로
+붙는다. 명령은 `./robot_run.sh` 하나다.
 
 ```
-  ┌──────── 비전 PC (Orin nano) ─────────┐        ┌────── 로봇 PC (Windows + WSL) ──────┐
-  │ RealSense D435i ─► 한양대 통합 비전 노드 │        │  시퀀스 ─► 로봇 제어 ─► Elite CS616 │
-  │ 그리퍼 (USB, /set_pos)               │  TCP   │   ▲  │      (29999/30001/502)      │
-  │ tomato_tcp_bridge  (서버 :9000)  ◄───┼────────┼── vision_bridge_client           │
-  │ 비전 패널 http://<Orin>:8081          │ 9000   │  작업 UI http://localhost:8080     │
-  └──────────────────────────────────────┘        └─────────────────────────────────────┘
+  ┌───────────────────────────── Orin nano ─────────────────────────────┐
+  │ RealSense D435i ─► 한양대 통합 비전 노드 ─┐                           │
+  │ 그리퍼 (USB, /set_pos) ◄──────────────────┼── 시퀀스 ─► 로봇 제어 ───┼──► Elite CS616
+  │                                           │     ▲                     │   (29999/30001/502)
+  │ 비전 패널  http://<Orin>:8081  (비전·그리퍼 켜기/끄기, 촬영 시험)    │
+  │ 작업 UI    http://<Orin>:8080  (연결, [비전 시작], [작업 시작], 티칭) │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## 실행 — 로봇 PC 에서 한 줄
+## 실행
 
 ```bash
-cd ~/ws_hy && ./robot_run.sh            # 작업 UI 에서 로봇 IP · Orin IP 넣고 [연결]
-#   또는 ./robot_run.sh --connect      # 지난번 주소로 바로 연결
+cd ~/tomato_ws && ./robot_run.sh
 ```
 
-`http://localhost:8080` 의 "연결" 카드에서 **[비전 시작]** → "준비 완료" 가 뜨면
-**[작업 시작]** (연속은 [연속 시작]). Orin 에 가서 따로 칠 것은 없다 — Orin 은 전원만
-켜져 있으면 된다(아래 "[비전 시작] 버튼").
+Orin 화면에 작업 UI 창(`http://localhost:8080`)이 뜬다. 다른 PC 브라우저에서는
+`http://<Orin IP>:8080`.
 
-Orin 에서 직접 켜고 싶으면(Orin 화면으로 패널을 보며 시험할 때 등) 예전처럼:
+1. **로봇 IP** 를 넣고 **[연결]**
+2. **[비전 시작]** → "준비 완료 — 작업 UI 에서 [작업 시작] 하면 됩니다" (카메라·YOLO·그리퍼, 10~60 초)
+3. **[작업 시작]** (연속은 [연속 시작])
 
-```bash
-cd ~/tomato_ws && ./vision_run.sh       # Orin 에서
-#    -> 터미널에 "[상태] 준비 완료 — 로봇 PC(robot_run.sh) 의 [연결] 을 기다리는 중"
-```
+끝낼 때는 터미널에서 Ctrl+C — 카메라·비전·그리퍼까지 함께 내린다.
 
-`vision_run.sh` 는 카메라 + YOLO(한양대 `tomato_vision_d435i_v2.launch.py`), 그리퍼,
-외부 통신 브리지를 켠다. **한양대 쪽이 이미 켜 둔 노드는 그대로 쓴다** — 예를 들어
-다른 터미널에서
+| 옵션 | |
+| --- | --- |
+| `./robot_run.sh --connect` | 기억해 둔 로봇 주소(`~/.tomato_pick/connection.yaml`)로 바로 연결 |
+| `./robot_run.sh --autostart` | 비전·그리퍼도 바로 켬 ([비전 시작] 을 누른 것처럼) |
+| `./robot_run.sh --v1` / `--v3` | 비전 런치를 v1 / v3 로 (기본 v2 — README.odt 권장, 윤곽선 깊이로 반지름) |
+| `./robot_run.sh --no-window` | 화면에 UI 창을 안 띄움 (SSH 로 실행하면 원래 안 띄운다) |
+| `./robot_run.sh --restart` | 돌던 것을 내리고 다시 |
+| `./stop.sh` | 전부 내림 — **한양대 터미널에서 켠 비전 노드도** 내린다 |
+| `./vision_run.sh` | 비전만 (로봇 없이 비전 시험할 때) — 패널 창이 뜨고 비전·그리퍼를 바로 켬 |
+
+`./run.sh` 는 `./robot_run.sh` 와 같다.
+
+**한양대 쪽이 이미 켜 둔 노드는 그대로 쓴다** — 예를 들어 다른 터미널에서
 
 ```bash
 cd ~/doosan_manipulator && source install/setup.bash
@@ -40,30 +48,55 @@ ros2 launch doosan_vision_grasp tomato_vision_d435i_v2.launch.py
 ros2 run doosan_vision_grasp dyn_test
 ```
 
-로 켜 두었으면 `vision_run.sh` 는 비전·그리퍼를 또 띄우지 않고 브리지만 켠다
-(같은 카메라·시리얼 포트를 둘이 잡으면 둘 다 망가진다). 그 상태로 `robot_run.sh`
-에서 작업을 시작하면 된다. 끝낼 때 `vision_run.sh` 의 Ctrl+C 는 **자기가 켠 것만**
-내린다.
+로 켜 두었으면 [비전 시작] 은 비전·그리퍼를 또 띄우지 않고 그것을 쓴다(같은 카메라·
+시리얼 포트를 둘이 잡으면 둘 다 망가진다). 그쪽에서 켠 것은 이쪽에서 끄지 않는다.
+이를 위해 ROS 는 **새 터미널과 같은 기본값**(ROS_DOMAIN_ID 0, 모든 인터페이스)을
+쓴다. 한양대 터미널에서 ROS_DOMAIN_ID 를 바꿨다면 같게 맞춘다.
 
-| 옵션 | |
+## 작업 UI
+
+**UI 부터 뜨고, 로봇 연결은 화면에서 한다.** "연결" 카드에 **로봇 IP**(예:
+192.168.1.200)를 넣고 **[연결]** 을 누르면 그때 붙는다. `--connect` 를 주면 이 버튼을
+대신 누른다.
+
+- 마지막에 연결한 주소는 `~/.tomato_pick/connection.yaml` 에 남아 다음에 미리 채워진다.
+- 주소 형식이 틀리면(예: `192.168.1.2000`) 접속을 시도하지 않고 바로 알려 준다.
+- 로봇이 아직 안 켜져 있어도 [연결] 을 누른 뒤에는 2 초마다 다시 시도한다.
+  멈추려면 **[연결 해제]**. 연결되기 전에는 작업 시작을 거절한다.
+
+같은 카드 아래 **"비전"** 칸:
+
+| 버튼 | 하는 일 |
 | --- | --- |
-| `./vision_run.sh --v1` / `--v3` | 비전 런치를 v1 / v3 로 (기본 v2 — README.odt 권장, 윤곽선 깊이로 반지름) |
-| `./vision_run.sh --no-window` | Orin 화면에 패널 창을 안 띄움 |
-| `./robot_run.sh --connect` | 기억해 둔 주소(`~/.tomato_pick/connection.yaml`)로 바로 연결 |
-| `--restart` (둘 다) | 이 워크스페이스가 띄운 것을 내리고 다시 |
-| `./stop.sh` | 전부 내림 — Orin 에서는 **한양대 터미널에서 켠 비전 노드도** 내린다 |
+| **[비전 시작]** | 비전 패널에 "전체 시작" — 카메라 + YOLO(한양대 런치), 그리퍼. 패널이 떠 있지 않으면 `vision_run.sh` 를 띄운다 |
+| **[비전 정지]** | 비전 패널에 "전체 중지" — **패널이 켠 것만** 내린다. 작업 중(일시정지 포함)에는 거절 — 먼저 [정지] |
+| 비전 패널 열기 | `:8081` 패널을 새 창으로 — 카메라 미리보기, 촬영 시험, 그리퍼 수동 열기/닫기 |
 
-`./run.sh` 는 둘을 합친 것이다(Jetson 이면 Orin 쪽, 아니면 로봇 PC 쪽).
+아래에 비전·그리퍼 상태(준비됨·켜는 중·꺼짐·문제 있음)가 1 초마다 보인다.
 
-## 두 장비가 주고받는 것
+## 비전 패널 (:8081)
 
-TCP 브리지(JSON Lines, 포트 9000)는 비전 팀의 `tomato_tcp_bridge` 를 넓혀 쓴다
-(protocol 3 — 예전 클라이언트와 호환).
+`robot_run.sh` 가 같이 띄우는 웹 화면이다(`vision_run.sh` 로 따로 띄워도 된다).
 
-| 방향 | 내용 |
-| --- | --- |
-| 로봇 PC → Orin | `{"cmd":"nearest_capture"}` · `{"cmd":"middle_capture"}` · `pick_capture` · `capture` 촬영 / `{"cmd":"gripper","position":4095}` / `ping` |
-| Orin → 로봇 PC | `{"type":"result", "source":"nearest", "tomatoes":[{position(m, 카메라 좌표), weight_g, height_m}...]}` |
+| 부품 | 패널이 띄우는 것 | "준비됨" 으로 보는 조건 | 패널에서 하는 일 |
+| --- | --- | --- | --- |
+| 비전 (카메라 + YOLO) | `tomato_vision_d435i_v2.launch.py` | 카메라 영상이 들어오고 비전 노드가 `/tomato/nearest_capture` 를 구독 | **촬영 시험(최근접)** + 결과 표, 카메라 미리보기 |
+| 그리퍼 | `gripper_dynamixel_node` | 모터가 현재 위치를 답함 | **열기(0) / 닫기(4095) / 위치 직접 입력** |
+
+- 한양대 터미널에서 켠 노드는 **"패널 밖"** 으로 표시하고 그대로 쓴다. 한양대
+  `dyn_test` 는 현재 위치를 내보내지 않아 "위치 피드백 없음" 으로 보인다.
+- 준비 상태가 바뀔 때마다 터미널에도 `[상태] …` 한 줄이 찍힌다(화면 없이 쓸 때).
+- 카메라 영상이 없으면 촬영 시험은 거절한다 — 비전 노드가 촬영 요청을 조용히
+  무시해 결과가 영영 안 오기 때문이다.
+- 그리퍼 노드는 한양대 `dxl_test`(2026-10) 처럼 **하드웨어 에러(과부하 등)를
+  복구**한다 — 재부팅 → 토크 ON → 마지막 목표 재전송, 명령당 3 번까지.
+- 로봇이 작업하는 동안에는 촬영 시험·그리퍼 수동 조작을 하지 않는다.
+
+모델은 `models/best.pt`(위치 인식) 와 `models/tomato_v1.pt`(무게) 다. 저장소에는
+없으므로(용량) 따로 넣는다. 런치는 이 워크스페이스 → 한양대 워크스페이스
+(`~/doosan_manipulator`) 순으로 파이썬·노드·모델을 찾는다.
+
+## 비전 토픽
 
 | 촬영 | 한양대 노드 결과 토픽 | 시퀀스에서 |
 | --- | --- | --- |
@@ -73,50 +106,16 @@ TCP 브리지(JSON Lines, 포트 9000)는 비전 팀의 `tomato_tcp_bridge` 를 
 | `capture` — 면적·높이 무게 | `/tomato/center_positions` …  `/tomato/heights` | (아래를 볼 때만 의미 — 쓰지 않음) |
 
 어느 촬영을 쓸지는 `vision.first_capture` / `vision.recapture` (설정 파일).
-
-**카메라 좌표 → 로봇 좌표 변환은 로봇 PC 에서 한다.** 로봇 PC 가 지금 TCP 를
-알고 있기 때문이다. Orin 은 카메라 좌표계 결과만 던진다. 결과는 로봇 PC 에서
-한양대 노드와 **같은 토픽 이름**으로 다시 나오므로 시퀀스는 비전이 어디 있든 같다.
-
-**연결이 끊기면 안전하게 멈춘다.** 작업 중에 Orin 이 끊기면 시퀀스가 로봇을
-세우고("비전 PC(Orin) 연결이 끊겼습니다"), 끊긴 동안은 작업 시작을 거절한다.
-Orin 이 돌아오면 2 초 안에 저절로 다시 붙는다.
+카메라 좌표 → 로봇 좌표 변환은 시퀀스가 그 순간의 TCP 로 한다.
 
 ## 네트워크
-
-**로봇 PC 가 모든 연결을 먼저 거는 쪽**이다(로봇에도, Orin 에도). WSL2 는 기본
-NAT 네트워크에서 바깥으로 나가는 연결은 그대로 되므로 **WSL 쪽 설정이 필요
-없다** — mirrored 모드도, 포트포워딩도, Windows 방화벽 규칙도 안 건드린다.
-Windows 의 유선 랜에 주소만 있으면 된다.
-
-권장 배선 — **스위치 허브 하나에 셋 다** 꽂고 같은 대역으로:
 
 | 장비 | 주소 | 설정 위치 |
 | --- | --- | --- |
 | Elite CS616 | 192.168.1.200 | 펜던트 |
-| Orin (`enP8p1s0`) | 192.168.1.10 | `robot-lan` 프로필 (만들어 둠, 아래) |
-| 로봇 PC (Windows 유선 랜) | 192.168.1.20 | Windows 네트워크 설정 |
+| Orin (`enP8p1s0`, 유선) | 192.168.1.10 | `robot-lan` 프로필 (만들어 둠, 아래) |
 
-Windows 쪽은 관리자 PowerShell 에서 (어댑터 이름은 `Get-NetAdapter` 로 확인):
-
-```powershell
-New-NetIPAddress -InterfaceAlias "이더넷" -IPAddress 192.168.1.20 -PrefixLength 24
-```
-
-배선이 다르면 `scripts/env.sh` 의 세 줄만 고친다.
-
-```bash
-export ROBOT_IP="${ROBOT_IP:-192.168.1.200}"      # 로봇
-export VISION_HOST="${VISION_HOST:-192.168.1.10}" # Orin — 로봇 PC 가 여기 접속
-export BRIDGE_PORT="${BRIDGE_PORT:-9000}"
-```
-
-예) 로봇만 PC 에 직결하고 Orin 은 Wi-Fi 공유기로 붙인다면 `VISION_HOST` 를
-Orin 의 Wi-Fi 주소(지금 192.168.0.103)로.
-
-두 장비의 ROS 는 서로를 보지 않는다(`ROS_LOCALHOST_ONLY=1`). 잇는 건 TCP
-브리지 하나뿐이다 — 같은 토픽 이름이 양쪽에 있어 서로 보이면 명령이 메아리처럼
-되돌아오기 때문이다.
+로봇 주소가 다르면 UI 에 넣으면 된다(기본값은 `scripts/env.sh` 의 `ROBOT_IP`).
 
 Orin 유선 주소는 아래 프로필로 고정해 두었다(재부팅해도 유지). `ip addr add`
 로 붙인 주소는 NetworkManager 가 지워 버리므로 프로필이어야 한다.
@@ -127,106 +126,38 @@ sudo nmcli con add type ethernet ifname enP8p1s0 con-name robot-lan \
     ipv6.method ignore connection.autoconnect yes
 ```
 
-## 준비 (장비마다 한 번)
+## 준비 (한 번)
 
 ```bash
-cd <워크스페이스> && bash scripts/setup.sh
+cd ~/tomato_ws && bash scripts/setup.sh
 ```
 
-같은 스크립트가 장비를 보고 다르게 동작한다.
-
-| 단계 | 비전 PC (Orin) | 로봇 PC (WSL) |
-| --- | --- | --- |
-| ROS 노드용 의존 (`requirements/ros.txt`, 시스템 파이썬) | O | O |
-| 가상환경 + YOLO 의존 | O — **torch 는 건드리지 않는다**(JetPack 휠) | **안 한다** (torch 불필요) |
-| `colcon build --symlink-install` | O | O |
-| 폴더에 들어오면 자동 환경 | direnv 있으면 `.envrc` 승인, 없으면 `~/.bashrc` 훅 | 〃 |
-| 주변 확인 | 카메라 패키지·시리얼 권한·모델 파일 | 로봇·Orin 브리지 도달 여부 |
-
-`direnv: error ... .envrc is blocked` 가 뜨면 `setup.sh` 를 한 번 돌리거나
-`direnv allow` 하면 된다.
+| 단계 | |
+| --- | --- |
+| ROS 노드용 의존 (`requirements/ros.txt`, 시스템 파이썬) | O |
+| 가상환경 + YOLO 의존 | O — Jetson 이면 **torch 는 건드리지 않는다**(JetPack 휠) |
+| `colcon build --symlink-install` | O |
+| 폴더에 들어오면 자동 환경 | direnv 있으면 `.envrc` 승인, 없으면 `~/.bashrc` 훅 |
+| 주변 확인 | 로봇 응답, 카메라 패키지, 시리얼 권한, 모델 파일 |
 
 ROS 노드용 의존을 시스템 파이썬에 까는 이유: colcon 이 만든 ROS 실행 파일의
 shebang 이 `/usr/bin/python3` 라서, 가상환경에만 깔면 `pyModbusTCP` 를 못 찾는다.
 
-Orin 으로 폴더를 옮길 때는 빌드 결과를 빼고 보낸다(이 PC 의 절대 경로가 박혀
-있다). 실수로 같이 보내도 `setup.sh` 가 알아보고 지운 뒤 다시 빌드한다.
+**업데이트**는 `git pull` 이다. 파이썬 코드만 바뀌면 그대로 반영되고(심볼릭 링크
+빌드), 노드가 새로 생기거나 `setup.py` 가 바뀌었으면 한 번 다시 빌드한다.
 
 ```bash
-rsync -av --exclude build --exclude install --exclude log --exclude venv \
-      --exclude '*.zip' --exclude '*.odt' --exclude '*Zone.Identifier' \
-      ~/ws_hy/ nano@<ORIN_IP>:~/tomato_ws/
+cd ~/tomato_ws && git pull
+PYTHONNOUSERSITE=1 colcon build --symlink-install    # 필요할 때만
 ```
 
-## 로봇 PC 작업 UI 의 연결
-
-**로봇 PC 는 UI 부터 뜨고, 연결은 화면에서 한다**(`./robot_run.sh`). 맨 위 "연결"
-카드에 **로봇 IP**(예: 192.168.1.200) 와 **Orin IP**(예: 192.168.1.10) 를 넣고
-**[연결]** 을 누르면 그때 붙는다. `--connect` 를 주면 이 버튼을 대신 누른다.
-
-- 마지막에 연결한 주소는 `~/.tomato_pick/connection.yaml` 에 남아 다음에 미리 채워진다.
-- 주소 형식이 틀리면(예: `192.168.1.2000`) 접속을 시도하지 않고 바로 알려 준다.
-- 상대가 아직 안 켜져 있어도 [연결] 을 누른 뒤에는 2 초마다 다시 시도한다.
-  멈추려면 **[연결 해제]**.
-- 연결되기 전이나 [연결 해제] 뒤에는 작업 시작을 거절한다.
-- 주소를 바꿔 다시 [연결] 하면 이전 연결을 끊고 새 주소로 옮긴다.
-
-## [비전 시작] 버튼 (로봇 PC 작업 UI)
-
-"연결" 카드 아래 "Orin 비전" 칸. Orin IP 칸의 주소를 쓴다.
-
-| 버튼 | Orin 비전 패널(:8081)이 떠 있으면 | 안 떠 있으면 |
-| --- | --- | --- |
-| **[비전 시작]** | 패널에 "전체 시작" 요청 | SSH 로 Orin 의 `~/tomato_ws/vision_run.sh --no-window` 를 띄움 (로그: Orin `/tmp/vision_run.log`) |
-| **[비전 정지]** | 패널에 "전체 중지" — **패널이 켠 것만** 내림 (한양대 터미널에서 켠 노드는 그대로) | (꺼져 있으니 할 일 없음) |
-
-- 시작이 받아들여지면 외부 통신(브리지)도 그 Orin 으로 걸어 둔다 — Orin 쪽이 뜨는 대로
-  붙으므로 [연결] 을 따로 누르지 않아도 비전은 이어진다(로봇은 [연결] 이 필요).
-- 아래에 Orin 의 상태(비전 / 그리퍼 / 외부 통신 각각 준비됨·켜는 중·꺼짐)가 1 초마다 보인다.
-- 작업 중(일시정지 포함)에는 [비전 정지] 를 거절한다 — 먼저 [정지].
-- 실측: 패널이 꺼진 Orin 에서 [비전 시작] → 응답 1.2 초, 세 부품 준비 + 브리지 연결 약 9 초.
-
-SSH 는 **키 인증만** 쓴다(비밀번호를 묻지 않고 실패로 알린다). 이 PC 에서 처음 한 번:
-
-```bash
-ssh-copy-id nano@192.168.1.10
-```
-
-Orin 계정·폴더가 다르면 `ORIN_USER` / `ORIN_WS` 환경변수(기본 `nano` / `~/tomato_ws`)로
-바꾼다. 한양대 쪽이 Orin 에서 비전 노드를 먼저 켜 두었어도 [비전 시작] 은 그것을 그대로
-쓰고 나머지(그리퍼·브리지)만 켠다 — `vision_run.sh` 와 같다.
-
-## 비전 패널 (Orin)
-
-`vision_run.sh` 가 같이 띄우는 웹 화면(`http://<Orin IP>:8081`)이다. Orin 화면에서
-실행하면 창이 자동으로 열린다. 로봇 PC 브라우저에서도 열린다.
-
-| 부품 | 패널이 띄우는 것 | "준비됨" 으로 보는 조건 | 패널에서 하는 일 |
-| --- | --- | --- | --- |
-| 비전 (카메라 + YOLO) | `tomato_vision_d435i_v2.launch.py` | 카메라 영상이 들어오고 비전 노드가 `/tomato/nearest_capture` 를 구독 | **촬영 시험(최근접)** + 결과 표, 카메라 미리보기 |
-| 그리퍼 | `gripper_dynamixel_node` | 모터가 현재 위치를 답함 | **열기(0) / 닫기(4095) / 위치 직접 입력** |
-| 외부 통신 | `tomato_tcp_bridge` (protocol 3) | 상태를 알림 — 로봇 PC 가 붙으면 그 주소 | |
-
-- 한양대 터미널에서 켠 노드는 **"패널 밖"** 으로 표시하고 그대로 쓴다. 패널 밖에서
-  켠 것은 패널에서 끄지 않는다(켠 터미널에서 Ctrl+C). 한양대 `dyn_test` 는 현재
-  위치를 내보내지 않아 "위치 피드백 없음" 으로 보인다.
-- 이를 위해 **Orin 쪽 ROS 는 새 터미널과 같은 기본값**(ROS_DOMAIN_ID 0, 모든
-  인터페이스)을 쓴다. 한양대 터미널에서 ROS_DOMAIN_ID 를 바꿨다면 같게 맞춘다.
-- 준비 상태가 바뀔 때마다 터미널에도 `[상태] …` 한 줄이 찍힌다(화면 없이 쓸 때).
-- 카메라 영상이 없으면 촬영 시험은 거절한다 — 비전 노드가 촬영 요청을 조용히
-  무시해 결과가 영영 안 오기 때문이다.
-- 그리퍼 노드는 한양대 `dxl_test`(2026-10) 처럼 **하드웨어 에러(과부하 등)를
-  복구**한다 — 재부팅 → 토크 ON → 마지막 목표 재전송, 명령당 3 번까지.
-- 로봇 PC 가 작업하는 동안에는 촬영 시험·그리퍼 수동 조작을 하지 않는다.
-
-모델은 `models/best.pt`(위치 인식) 와 `models/tomato_v1.pt`(무게) 다. 저장소에는
-없으므로(용량) Orin 으로는 rsync 로 보낸다. 런치는 이 워크스페이스 → 한양대
-워크스페이스(`~/doosan_manipulator`) 순으로 파이썬·노드·모델을 찾는다.
+`PYTHONNOUSERSITE=1` 은 꼭 붙인다 — Orin 의 `~/.local` 에 있는 새 setuptools 때문에
+붙이지 않으면 심볼릭 링크 대신 복사로 빌드돼 코드 수정이 반영되지 않는다.
 
 ## 위치 가르치기
 
-펜던트로 로봇을 원하는 자리에 세워 두고 로봇 PC UI 버튼을 누르면 **지금
-자세·관절값을 읽어 저장**한다(로봇은 움직이지 않는다). 저장 위치는 **로봇 PC 의**
+펜던트로 로봇을 원하는 자리에 세워 두고 작업 UI 버튼을 누르면 **지금
+자세·관절값을 읽어 저장**한다(로봇은 움직이지 않는다). 저장 위치는
 `~/.tomato_pick/taught_poses.yaml` 이며 설정 파일보다 우선한다. 작업 중에는
 가르칠 수 없다(정지한 뒤에).
 
@@ -250,11 +181,9 @@ Orin 계정·폴더가 다르면 `ORIN_USER` / `ORIN_WS` 환경변수(기본 `na
 풀어 간다 — 대기 자세를 한 번 다시 가르치면 관절값까지 저장된다. 예전의
 "하강 한계 Z" 는 없어졌다(읽을 때 버린다).
 
-## 외부 시스템과 작업 트리거 주고받기 (로봇 PC)
+## 외부 시스템과 작업 트리거 주고받기
 
-작업 시작·상태는 **로봇 PC 의 ROS** 에서 주고받는다. 비전 쪽 토픽
-(`/tomato/*`, `/set_pos`)은 브리지가 로봇 PC 안에 그대로 다시 만들어 주므로
-아래 표는 한 대 구성과 같다.
+작업 시작·상태는 ROS 토픽·서비스로도 주고받을 수 있다(같은 ROS 도메인에서).
 
 | 방향 | 이름 | 타입 | 내용 |
 | --- | --- | --- | --- |
@@ -339,10 +268,17 @@ ros2 topic echo /pick/result
 카메라 두께 25 mm → 33 mm, 화면 중심은 오른쪽으로 17.5 mm. **그리퍼**는
 하단으로 102 mm(핑거 제외) / 172 mm(핑거 전개 후 끝단).
 
-## 로봇·Orin 없이 시험
+## 로봇 없이 시험
 
-PC 한 대에서 두 장비를 흉내 낼 수 있다. ROS 도메인을 나눠 둘이 서로를 못
-보게 하고 TCP 브리지로만 잇는다 — 실제 분리 구성과 같은 조건이다.
+로봇 대신 시뮬레이터를 쓴다(`tools/elite_robot_simulator.py`, Modbus 5502).
+
+```bash
+python3 src/elite_robot_controller/tools/elite_robot_simulator.py &
+./robot_run.sh modbus_port:=5502      # UI 에서 로봇 IP 127.0.0.1 로 [연결]
+```
+
+아래는 예전 두 대 구성을 PC 한 대에서 흉내 낸 방식이다. ROS 도메인을 나눠 둘이
+서로를 못 보게 하고 TCP 브리지로만 잇는다.
 
 ```bash
 # "Orin" 쪽 (도메인 31): 브리지 서버 + 가짜 YOLO/그리퍼
@@ -353,8 +289,8 @@ ROS_DOMAIN_ID=31 ROS_LOCALHOST_ONLY=1 python3 <가짜 비전 노드> &
 python3 src/elite_robot_controller/tools/elite_robot_simulator.py &
 
 # "로봇 PC" 쪽 (도메인 32): 실제 run.sh 그대로
-ROS_DOMAIN_ID=32 TOMATO_ROLE=pc VISION_HOST=127.0.0.1 ROBOT_IP=127.0.0.1 \
-    ./run.sh modbus_port:=5502
+ROS_DOMAIN_ID=32 VISION_HOST=127.0.0.1 ROBOT_IP=127.0.0.1 \
+    ./run.sh --role pc modbus_port:=5502
 ```
 
 2026-10-07 이 방식으로 확인한 것: 촬영 2 회·결과 2 회·그리퍼 닫기/열기가
@@ -388,8 +324,39 @@ Orin 복귀 → 자동 재접속.
   (X +64.4, Y −29.9, Z 357 mm). 패널이 떠 있는 상태 → HTTP 로 전체 시작, 8 초 뒤 준비.
   [비전 정지] → 세 부품 꺼짐, 브리지 대기
 
+2026-10-16 한 대 구성으로 바꾼 뒤 (실제 Orin, 시험용 복사본·다른 포트에서, 로봇은 연결 안 함):
+
+- 실행하면 로봇 제어·시퀀스·작업 UI·비전 패널만 뜨고 브리지·Orin 연결은 없음
+  (Orin IP 칸·연결 오류 없음)
+- [비전 시작] → 12 초 뒤 비전·그리퍼 준비. 촬영 결과(`/tomato/nearest_position`)를
+  시퀀스가 직접 구독, `/set_pos` 는 그리퍼 노드로 바로 감
+- [비전 정지] → 비전·그리퍼 꺼짐 → [비전 시작] 다시 → 9 초 뒤 준비
+- 비전이 켜진 채 Ctrl+C → 4 초 만에 전부 내려감, 카메라·비전·그리퍼 프로세스 남지 않음,
+  종료 오류 메시지 없음
+- 터미널에 예전 역할(`TOMATO_ROLE=orin`)이 남아 있어도 한 대 구성으로 뜸
+
 계산만 보는 시험은 ROS 도 필요 없다.
 
 ```bash
 python3 -m pytest src/elite_robot_controller/test/test_tomato_pick.py
 ```
+
+## 두 대로 나눠 쓸 때 (예전 방식)
+
+비전은 Orin, 로봇·UI 는 다른 PC(WSL 등)에 두고 TCP 브리지(포트 9000)로 잇는 구성도
+남아 있다. 역할을 직접 고를 때만 이렇게 동작한다.
+
+```bash
+./run.sh --role orin --autostart      # Orin: 비전 패널 + 브리지 서버
+./run.sh --role pc                    # 로봇 PC: 로봇·UI + 브리지 클라이언트 (Orin IP 칸이 생김)
+```
+
+- 로봇 PC 쪽 ROS 는 다른 장비를 보지 않는다(`ROS_LOCALHOST_ONLY=1`, 도메인 7) — 같은
+  토픽이 양쪽에서 보이면 명령이 메아리처럼 되돌아오기 때문이다. 둘을 잇는 건 브리지뿐이다.
+- 브리지(JSON Lines, protocol 3): 로봇 PC → Orin 은 촬영 명령(`nearest_capture` 등)·그리퍼
+  위치·ping, Orin → 로봇 PC 는 촬영 결과(카메라 좌표). 결과는 로봇 PC 에서 같은 토픽
+  이름으로 다시 나온다. 작업 중 끊기면 시퀀스가 로봇을 세운다.
+- 로봇 PC UI 의 [비전 시작] 은 Orin 패널을 HTTP 로 부르고, 패널이 없으면 SSH(**키 인증만**,
+  `ssh-copy-id nano@<Orin IP>` 한 번)로 Orin 의 `vision_run.sh` 를 띄운다. Orin 계정·폴더는
+  `ORIN_USER` / `ORIN_WS`(기본 `nano` / `~/tomato_ws`).
+- 로봇 PC(WSL) 준비는 `TOMATO_ROLE=pc bash scripts/setup.sh` — 가상환경·torch 를 깔지 않는다.

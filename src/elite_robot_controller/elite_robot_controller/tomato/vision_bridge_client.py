@@ -29,6 +29,7 @@ import threading
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Pose, PoseArray
 from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, Float32MultiArray, Int32, String
@@ -344,11 +345,12 @@ def main(args=None):
     node = VisionBridgeClient()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # Ctrl+C
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

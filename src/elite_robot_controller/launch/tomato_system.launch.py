@@ -1,20 +1,22 @@
 """토마토 수확 시스템 실행 — 켤 부품을 골라 한 번에 띄운다.
 
-    ros2 launch elite_robot_controller tomato_system.launch.py
+    ./robot_run.sh      # 보통은 이걸로 (아래 인자를 골라 이 런치를 부른다)
 
 부품:
 
-1. RealSense D435i (`realsense2_camera`, depth-color 정렬 켬)        camera
-2. 토마토 측정 노드 (`doosan_vision_grasp`, **YOLO 가상환경 파이썬**)  vision
-3. 다이나믹셀 그리퍼 노드 (`/set_pos`)                                gripper
+1. RealSense D435i (`realsense2_camera`, depth-color 정렬 켬)        camera   (예전 방식)
+2. 토마토 측정 노드 (`doosan_vision_grasp`, **YOLO 가상환경 파이썬**)  vision   (예전 방식)
+3. 다이나믹셀 그리퍼 노드 (`/set_pos`)                                gripper  (예전 방식)
 4. Elite 로봇 제어 노드 + 픽앤플레이스 시퀀스                           robot
 5. 웹 UI (기본 8080)                                                 ui
-6. 비전 PC <-> 로봇 PC TCP 브리지                                     bridge
+6. 비전 패널 (8081) — 한양대 비전 런치·그리퍼를 켜고 끈다             panel
+7. 비전 PC <-> 로봇 PC TCP 브리지 (두 대로 나눌 때만)                  bridge
 
-분리 구성(비전은 Orin, 로봇은 PC)에서는 `run.sh` 가 장비에 맞춰 골라 준다.
+`run.sh` 가 골라 주는 조합:
 
-    Orin:  camera vision gripper  + bridge:=server   (robot:=false ui:=false)
-    PC  :  robot ui               + bridge:=client   (camera/vision/gripper:=false)
+    한 대(기본):  robot ui panel       (camera/vision/gripper:=false, bridge:=none)
+                 비전·그리퍼는 작업 UI 의 [비전 시작] 으로 패널이 띄운다
+    두 대 — PC :  robot ui + bridge:=client
 
 **꺼 둔 부품은 찾지도 않는다.** 로봇 PC 에는 카메라 패키지도 YOLO 가상환경도
 없는 게 정상이라, 그걸 찾다가 "없다" 고 알리면 헷갈리기만 한다. 그래서 실제
@@ -134,7 +136,21 @@ def _launch_setup(context):
                                       'connect_on_start': enabled('connect_on_start')}],
         ))
 
-    # ---- 6. 비전 PC <-> 로봇 PC TCP 브리지 ------------------------------
+    # ---- 6. 비전 패널 -------------------------------------------------
+    # 한양대 비전 런치(카메라 + YOLO)와 그리퍼를 자식 프로세스로 켜고 끈다. 끌 때
+    # 자식을 차례로 내리느라 몇 초 걸리므로, 런치가 기다려 주는 시간을 넉넉히 준다
+    # — 기본 5 초 만에 SIGTERM 을 보내면 카메라 프로세스가 고아로 남을 수 있다.
+    if enabled('panel'):
+        actions.append(Node(
+            package=PACKAGE, executable='vision_panel_node',
+            name='tomato_vision_panel', output='screen',
+            parameters=[pick_config, {'autostart': enabled('vision_autostart'),
+                                      'bridge': False,
+                                      'vision_launch': value('vision_launch')}],
+            sigterm_timeout='30',
+        ))
+
+    # ---- 7. 비전 PC <-> 로봇 PC TCP 브리지 ------------------------------
     if bridge == 'server':
         if _share(VISION_PACKAGE):
             actions.append(Node(
@@ -183,6 +199,14 @@ def generate_launch_description():
         DeclareLaunchArgument('gripper', default_value='true', description='그리퍼 노드 실행 여부'),
         DeclareLaunchArgument('robot', default_value='true', description='로봇·시퀀스 노드 실행 여부'),
         DeclareLaunchArgument('ui', default_value='true', description='웹 UI 실행 여부'),
+        DeclareLaunchArgument('panel', default_value='false',
+                              description='비전 패널(8081) 실행 여부 — 한 대에서 다 돌릴 때'),
+        DeclareLaunchArgument('vision_autostart', default_value='false',
+                              description='패널이 뜨자마자 비전·그리퍼를 켤지 (아니면 [비전 시작])'),
+        DeclareLaunchArgument('vision_launch',
+                              default_value=_default('VISION_LAUNCH',
+                                                     'tomato_vision_d435i_v2.launch.py'),
+                              description='패널이 켜는 한양대 비전 런치 (v1 / v2 / v3)'),
         # 분리 구성: 비전 PC(Orin) 는 server, 로봇 PC 는 client. 한 대에서
         # 다 돌릴 때는 none (같은 ROS 그래프라 브리지가 필요 없다).
         DeclareLaunchArgument('bridge', default_value='none',

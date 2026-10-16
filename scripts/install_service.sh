@@ -26,8 +26,9 @@ Wants=network-online.target
 Type=simple
 User=$USER_NAME
 WorkingDirectory=$WS
-# run.sh 가 ROS·가상환경·환경변수를 스스로 잡는다.
-ExecStart=/bin/bash $WS/run.sh
+# run.sh 가 ROS·가상환경·환경변수를 스스로 잡는다. 사람이 버튼을 누르지 않아도
+# 비전·그리퍼를 켜고(--autostart) 기억해 둔 로봇 주소로 붙는다(--connect).
+ExecStart=/bin/bash $WS/run.sh --autostart --connect --no-window
 ExecStop=/bin/bash $WS/scripts/stop_all.sh
 Restart=on-failure
 RestartSec=5

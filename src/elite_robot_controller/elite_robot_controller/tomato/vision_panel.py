@@ -1,6 +1,7 @@
-"""비전 PC(Orin) 조작 패널 — README.odt 의 수동 절차를 버튼으로 대신한다.
+"""비전 조작 패널 — README.odt 의 수동 절차를 버튼으로 대신한다.
 
-    ./vision_run.sh          # 이 패널을 띄우고 세 부품을 바로 켠다(빠진 것만)
+    ./robot_run.sh           # 로봇·작업 UI 와 함께 뜬다. 작업 UI 의 [비전 시작] 이 이 패널을 부른다
+    ./vision_run.sh          # 이 패널만 띄우고 비전·그리퍼를 바로 켠다(빠진 것만)
     # 브라우저: http://<Orin IP>:8081   (Orin 화면에서는 http://localhost:8081)
 
 한양대 README.odt(2026-10) 의 절차:
@@ -14,15 +15,15 @@
 | --- | --- | --- |
 | 비전 (카메라 + YOLO) | `tomato_vision_d435i_v2.launch.py` | 카메라 영상이 들어오고, 비전 노드가 `/tomato/nearest_capture` 를 구독 |
 | 그리퍼 | `gripper_dynamixel_node` (에러 복구 포함) | 모터가 현재 위치를 답함 |
-| 외부 통신 | `tomato_tcp_bridge` (protocol 3) | 브리지가 상태를 알림 — 로봇 PC 가 붙으면 그 주소도 |
+| 외부 통신 | `tomato_tcp_bridge` (protocol 3) — **두 대로 나눌 때만**(`bridge:=true`) | 브리지가 상태를 알림 — 로봇 PC 가 붙으면 그 주소도 |
 
 **한양대 쪽에서 직접 켠 노드는 그대로 쓴다.** 런치를 다른 터미널에서 띄웠거나
 `dyn_test` 를 켜 두었으면, 패널은 그것을 "패널 밖 — 그대로 사용" 으로 보고 같은
 것을 또 띄우지 않는다(같은 카메라·시리얼 포트를 둘이 잡으면 둘 다 망가진다).
 패널 밖에서 켠 것은 패널에서 끄지도 않는다 — 켠 터미널에서 Ctrl+C.
 
-이를 위해 Orin 쪽 ROS 는 **새 터미널과 같은 기본 설정**(ROS_DOMAIN_ID 0, 모든
-인터페이스)을 쓴다(scripts/env.sh). 한양대 터미널에서 켠 노드가 보여야 하기 때문이다.
+이를 위해 ROS 는 **새 터미널과 같은 기본 설정**(ROS_DOMAIN_ID 0, 모든 인터페이스)을
+쓴다(scripts/env.sh). 한양대 터미널에서 켠 노드가 보여야 하기 때문이다.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseArray
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
@@ -85,8 +86,11 @@ class VisionPanelNode(Node):
         self.declare_parameter("bridge_port", int(os.environ.get("BRIDGE_PORT", "9000")))
         self.declare_parameter("gripper_close_value", 4095)
         self.declare_parameter("gripper_open_value", 0)
-        #: True 면 패널이 뜨자마자 세 부품을 켠다 — 이미 떠 있는 것은 건너뛴다.
+        #: True 면 패널이 뜨자마자 부품을 켠다 — 이미 떠 있는 것은 건너뛴다.
         self.declare_parameter("autostart", False)
+        #: 로봇 PC 가 따로 있을 때(두 대로 나눌 때)만 TCP 브리지 서버를 부품으로 둔다.
+        #: 한 대에서 다 돌리면 같은 ROS 그래프라 필요 없다.
+        self.declare_parameter("bridge", False)
         #: 비전 런치 파일 (한양대 v1 / v2 / v3). README.odt 기준 v2 가 기본.
         self.declare_parameter("vision_launch", os.environ.get(
             "VISION_LAUNCH", "tomato_vision_d435i_v2.launch.py"))
@@ -97,6 +101,7 @@ class VisionPanelNode(Node):
         self.close_value = int(self.get_parameter("gripper_close_value").value)
         self.open_value = int(self.get_parameter("gripper_open_value").value)
         self.bridge_port = int(self.get_parameter("bridge_port").value)
+        self.bridge_enabled = bool(self.get_parameter("bridge").value)
         self._group = ReentrantCallbackGroup()
 
         # ---- 부품 ------------------------------------------------------
@@ -121,7 +126,7 @@ class VisionPanelNode(Node):
                                  10, callback_group=self._group)
         self.create_subscription(String, "vision/bridge/server_status", self._on_bridge,
                                  10, callback_group=self._group)
-        # 촬영 시험은 최근접 촬영(로봇 PC 가 대기 자세에서 쓰는 것과 같다).
+        # 촬영 시험은 최근접 촬영(시퀀스가 대기 자세에서 쓰는 것과 같다).
         self.create_subscription(PoseArray, "/tomato/nearest_position", self._on_poses,
                                  10, callback_group=self._group)
         self.create_subscription(Float32MultiArray, "/tomato/nearest_weight",
@@ -173,10 +178,11 @@ class VisionPanelNode(Node):
             "gripper", "그리퍼 (다이나믹셀)",
             ["ros2", "run", PACKAGE, "gripper_dynamixel_node", "--ros-args",
              "-r", "__node:=gripper_dynamixel", "--params-file", config]))
-        self.manager.add(ManagedProcess(
-            "bridge", "외부 통신 (로봇 PC 브리지)",
-            ["ros2", "run", VISION_PACKAGE, "tomato_tcp_bridge", "--ros-args",
-             "-p", f"port:={self.bridge_port}"]))
+        if self.bridge_enabled:
+            self.manager.add(ManagedProcess(
+                "bridge", "외부 통신 (로봇 PC 브리지)",
+                ["ros2", "run", VISION_PACKAGE, "tomato_tcp_bridge", "--ros-args",
+                 "-p", f"port:={self.bridge_port}"]))
 
     # ------------------------------------------------------------ 신호 수신
     def _on_camera_info(self, _msg):
@@ -257,13 +263,33 @@ class VisionPanelNode(Node):
             return []
         return [int(pid) for pid in out if pid.isdigit()]
 
+    @staticmethod
+    def _ancestors():
+        """이 패널과 그 부모들(ros2 launch, run.sh 등)의 PID."""
+        pids, pid = set(), os.getpid()
+        while pid > 1 and pid not in pids:
+            pids.add(pid)
+            try:
+                with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                    # "pid (comm) state ppid ..." — comm 에 공백·괄호가 있을 수 있어 뒤에서 자른다.
+                    pid = int(handle.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                break
+        return pids
+
     def _external_pids(self, name, pattern=None):
-        """패널 밖에서 떠 있는 프로세스. 패널이 띄운 프로세스 그룹과 자기 자신은 뺀다."""
+        """패널 밖에서 떠 있는 프로세스. 패널이 띄운 프로세스 그룹과 자기 자신은 뺀다.
+
+        패널을 띄운 부모들도 뺀다 — 한 대에서 다 돌리면 부모 `ros2 launch` 의 명령줄에
+        `vision_launch:=tomato_vision_d435i_v2.launch.py` 가 들어 있어, 그대로 두면
+        비전 노드가 "패널 밖에서 떠 있다" 고 잘못 보고 [비전 시작] 이 아무것도 켜지 않는다.
+        """
         process = self.manager.get(name)
         mine_group = process.pid if process and process.running else None
+        mine = self._ancestors()
         found = []
         for pid in self._pids(pattern or EXTERNAL[name]):
-            if pid == os.getpid():
+            if pid in mine:
                 continue
             try:
                 if mine_group is not None and os.getpgid(pid) == mine_group:
@@ -310,7 +336,7 @@ class VisionPanelNode(Node):
         return self.start(name)
 
     def start_all(self):
-        messages = [self.start(name)["message"] for name in ("vision", "gripper", "bridge")]
+        messages = [self.start(name)["message"] for name in list(self.manager.items)]
         return {"success": True, "message": " / ".join(messages)}
 
     def stop_all(self):
@@ -466,9 +492,11 @@ class VisionPanelNode(Node):
                 })
             result = {"age_s": round(time.time() - self.last_result["at"], 1),
                       "count": len(tomatoes), "tomatoes": tomatoes}
-        if ready:
+        if ready and not self.bridge_enabled:
+            overall = "준비 완료 — 작업 UI 에서 [작업 시작] 하면 됩니다"
+        elif ready:
             overall = ("준비 완료 — 로봇 PC 에서 [작업 시작] 하면 됩니다" if clients
-                       else "준비 완료 — 로봇 PC(robot_run.sh) 의 [연결] 을 기다리는 중")
+                       else "준비 완료 — 로봇 PC 의 [연결] 을 기다리는 중")
         elif any(c["state"] == "error" for c in components):
             overall = "확인이 필요한 부품이 있습니다"
         elif any(c["running"] for c in components):
@@ -482,7 +510,8 @@ class VisionPanelNode(Node):
                         "label": self._gripper_label(self.gripper_position)
                         if time.monotonic() - self.gripper_position_at < 2.0 else "",
                         "close_value": self.close_value, "open_value": self.open_value},
-            "bridge": {"port": self.bridge_port, "clients": clients},
+            "bridge": {"enabled": self.bridge_enabled, "port": self.bridge_port,
+                       "clients": clients},
             "result": result,
             "preview_available": self.preview_available,
         }
@@ -580,9 +609,13 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # Ctrl+C
         pass
     finally:
+        # 정리하는 동안 Ctrl+C 가 한 번 더 와도(터미널 + 런치가 각각 보낸다) 끊기지
+        # 않게 한다 — 끊기면 카메라·그리퍼 프로세스가 고아로 남는다.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

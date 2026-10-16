@@ -2,6 +2,7 @@ import threading
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import Bool, String, Int32, Int32MultiArray, Float32MultiArray
 from std_srvs.srv import Trigger
@@ -785,11 +786,12 @@ def main(args=None):
         rclpy.spin(node)
     except SystemExit: 
         pass
-    except KeyboardInterrupt: pass
+    except (KeyboardInterrupt, ExternalShutdownException): pass  # Ctrl+C
     finally:
         if 'node' in locals():
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
