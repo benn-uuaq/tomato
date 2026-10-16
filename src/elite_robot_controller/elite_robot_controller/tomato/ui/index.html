@@ -43,6 +43,8 @@
           border:1px solid var(--line); }
   .pill.on { background:var(--ok); color:#fff; border-color:var(--ok); }
   .pill.off { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .pill.wait { background:var(--warn); color:#fff; border-color:var(--warn); }
+  button:disabled { opacity:.45; cursor:default; }
   .warn { color:var(--warn); font-size:13px; line-height:1.6; }
   .log { font-family: ui-monospace, monospace; font-size:12.5px; white-space:pre-wrap;
          color:var(--muted); max-height:140px; overflow:auto; }
@@ -77,6 +79,19 @@
       <div class="linkline" id="visionLine"><b>Orin</b> <span id="visionLink">--</span></div>
     </div>
     <div class="log" id="connReply" style="margin-top:6px"></div>
+
+    <div id="visionBox" style="margin-top:14px; border-top:1px solid var(--line); padding-top:12px">
+      <strong style="font-size:14px">Orin 비전</strong>
+      <span style="font-size:13px; color:var(--muted)">
+        — 카메라·비전·그리퍼·외부 통신. Orin 에서 vision_run.sh 를 따로 켜지 않아도 됩니다.</span>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="btnVisionStart" onclick="visionCmd('start')">비전 시작</button>
+        <button id="btnVisionStop" onclick="visionCmd('stop')">비전 정지</button>
+      </div>
+      <div class="linkline" style="margin-top:8px" id="visionOverall">--</div>
+      <div style="margin-top:6px" id="visionParts"></div>
+      <div class="log" id="visionReply" style="margin-top:6px"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -225,6 +240,44 @@ async function connectAll() {
   btn.disabled = false;
 }
 
+async function visionCmd(action) {
+  const reply = document.getElementById('visionReply');
+  if (action === 'stop' && !confirm('Orin 의 카메라·비전·그리퍼·외부 통신을 끌까요?')) return;
+  reply.textContent = action === 'start'
+    ? 'Orin 비전을 켜는 중... (Orin 이 꺼져 있으면 SSH 로 vision_run.sh 를 띄웁니다)'
+    : 'Orin 비전을 끄는 중...';
+  try {
+    const r = await fetch('/vision/' + action, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({vision_host: document.getElementById('visionHost').value}),
+    });
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+}
+
+const PART_STATE = {ready: ['준비됨', 'on'], busy: ['동작 중', 'on'], starting: ['켜는 중', 'wait'],
+                    warning: ['확인 필요', 'wait'], error: ['문제 있음', 'off'], stopped: ['꺼짐', '']};
+
+function renderVisionPanel(s) {
+  const c = s.connection || {};
+  const v = s.vision_panel || {};
+  document.getElementById('visionBox').hidden = !c.has_bridge;
+  if (!c.has_bridge) return;
+  const overall = document.getElementById('visionOverall');
+  overall.textContent = v.text || '--';
+  overall.style.color = v.ready ? 'var(--ok)' : v.reachable ? 'var(--text)' : 'var(--muted)';
+  document.getElementById('visionParts').innerHTML = (v.components || []).map(p => {
+    const [text, cls] = PART_STATE[p.state] || [p.state, ''];
+    return `<span class="pill ${cls}" title="${(p.detail || '').replace(/"/g, '&quot;')}">`
+         + `${p.label} · ${text}${p.external ? ' (Orin 에서 직접 켬)' : ''}</span> `;
+  }).join('');
+  document.getElementById('btnVisionStart').disabled = !!v.starting;
+  document.getElementById('btnVisionStop').disabled = !!v.starting || !v.reachable;
+  const reply = document.getElementById('visionReply');
+  if (v.action && !reply.textContent) reply.textContent = v.action;
+}
+
 async function disconnectAll() {
   const reply = document.getElementById('connReply');
   try {
@@ -251,7 +304,7 @@ function renderConnection(s) {
   document.getElementById('visionLine').hidden = !c.has_bridge;
   const vs = c.vision_state || {};
   const vision = document.getElementById('visionLink');
-  const phase = {connected: '연결됨', connecting: '연결 중...', idle: '대기 ([연결] 을 누르세요)',
+  const phase = {connected: '연결됨', connecting: '연결 중...', idle: '대기 ([연결] 또는 [비전 시작] 을 누르세요)',
                  error: '실패 — ' + (vs.error || '') + ' (다시 시도 중)'};
   vision.textContent = phase[vs.phase] || '--';
   vision.style.color = vs.phase === 'connected' ? 'var(--ok)'
@@ -292,6 +345,7 @@ async function poll() {
     if (s.labels) LABELS = s.labels;
     if (s.order) { ORDER = s.order.map(o => o[0]); s.order.forEach(o => LABELS[o[0]] = o[1]); }
     renderConnection(s);
+    renderVisionPanel(s);
     document.getElementById('state').textContent = s.step || s.state || '--';
     document.getElementById('step').textContent = s.message || '';
     const conn = document.getElementById('conn');

@@ -20,7 +20,7 @@ class TomatoHeightAndAreaMeasurer(Node):
         # ==============================================================
         # 파라미터
         # ==============================================================
-        self.declare_parameter('capture_duration', 1.0)   # 1회 촬영 측정 시간 (초)
+        self.declare_parameter('capture_duration', 3.0)   # 1회 촬영 측정 시간 (초)
         self.declare_parameter('match_dist_px', 60.0)     # 동일 토마토 판정 거리 (픽셀)
         self.declare_parameter('debug_depth', False)      # Z_floor/Z_center 진단 로그
         # 미리보기 창(cv2.imshow) 사용 여부. 'auto' 면 DISPLAY 가 있을 때만 켠다.

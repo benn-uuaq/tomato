@@ -11,6 +11,7 @@ PATTERNS=(
     "tomato_system.launch"
     "realsense2_camera_node"
     "tomato_area_d435i"
+    "tomato_vision_d435i"        # 한양대 통합 비전 노드(2026-10) — 패널 밖에서 켠 것도 내린다
     "pick_sequence_node"
     "pick_ui_node"
     "robot_control_node"

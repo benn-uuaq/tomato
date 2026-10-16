@@ -130,7 +130,8 @@ def _launch_setup(context):
             # 화면에 처음 채울 주소(기억해 둔 주소가 있으면 그걸 쓴다).
             parameters=[pick_config, {'ui_port': int(value('ui_port')),
                                       'robot_ip': value('robot_ip'),
-                                      'vision_host': value('vision_host')}],
+                                      'vision_host': value('vision_host'),
+                                      'connect_on_start': enabled('connect_on_start')}],
         ))
 
     # ---- 6. 비전 PC <-> 로봇 PC TCP 브리지 ------------------------------
@@ -193,5 +194,8 @@ def generate_launch_description():
         # false 면 로봇·Orin 에 바로 붙지 않고 UI 에서 IP 를 넣고 [연결] 을 누를 때 붙는다.
         DeclareLaunchArgument('auto_connect', default_value='true',
                               description='기동하자마자 로봇·비전 PC 에 연결할지'),
+        # auto_connect:=false 인 로봇 PC 에서, UI 가 기억해 둔 주소로 [연결] 을 대신 누른다.
+        DeclareLaunchArgument('connect_on_start', default_value='false',
+                              description='UI 가 뜨자마자 기억한 주소로 연결할지 (robot_run.sh --connect)'),
     ]
     return LaunchDescription(arguments + [OpaqueFunction(function=_launch_setup)])

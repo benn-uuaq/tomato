@@ -7,8 +7,13 @@
     ros2 run elite_robot_controller gripper_dynamixel_node \
         --ros-args -p device:=/dev/ttyUSB0
 
-`/set_pos` (std_msgs/Int32) 로 목표 위치(0~4095)를 받는다. README 기준
-**3185 가 파지, 0 이 열림**이다. 시퀀스 노드가 이 값을 보낸다.
+`/set_pos` (std_msgs/Int32) 로 목표 위치(0~4095)를 받는다. README.odt(2026-10)
+기준 **4095 가 파지, 0 이 열림**이다. 시퀀스 노드가 이 값을 보낸다.
+
+**하드웨어 에러 복구** (한양대 dxl_test.py 2026-10 판과 같은 방식): 세게 물면
+과부하 에러가 래치돼 모터가 멈춘다. 0.1 초마다 에러 상태를 읽어, 걸려 있으면
+재부팅 -> 토크 ON -> 마지막 목표 재전송을 한다. 명령 하나당 최대 3 번까지만
+(무한 재부팅 방지) — 새 명령이 오면 다시 센다.
 
 `dynamixel_sdk` 가 없거나 포트를 못 열면 노드는 죽지 않고 경고만 남긴다 —
 그리퍼 없이 로봇 동작만 시험하는 경우가 많기 때문이다.
@@ -24,6 +29,12 @@ from std_msgs.msg import Int32
 ADDR_TORQUE_ENABLE = 64      # 1바이트: 1 = On, 0 = Off
 ADDR_GOAL_POSITION = 116     # 4바이트: 목표 위치 (0~4095)
 ADDR_PRESENT_POSITION = 132  # 4바이트: 현재 위치
+ADDR_HARDWARE_ERROR_STATUS = 70   # 1바이트: 하드웨어 에러 래치 상태
+
+#: Hardware Error Status 비트별 의미
+HW_ERROR_BITS = {0: "입력 전압 에러", 2: "과열 에러", 3: "엔코더 에러",
+                 4: "전기적 충격 에러", 5: "과부하(Overload) 에러"}
+MAX_RECOVERY_TRY = 3
 
 
 class GripperDynamixelNode(Node):
@@ -53,7 +64,11 @@ class GripperDynamixelNode(Node):
         # 구분해 보여 준다). 모터가 답하지 않으면 아무것도 내보내지 않는다.
         self.pub_present = self.create_publisher(Int32, "gripper/present_position", 10)
         self._read_failed = False
-        self.create_timer(0.5, self._publish_present)
+        self.last_goal = None          # 복구 뒤 다시 보낼 마지막 목표
+        self.recovery_count = 0
+        self._tick = 0
+        # 0.1 초마다 에러를 보고, 0.5 초마다 현재 위치를 알린다.
+        self.create_timer(0.1, self._watchdog)
 
     def _open_port(self):
         device = str(self.get_parameter("device").value)
@@ -77,7 +92,15 @@ class GripperDynamixelNode(Node):
             self.get_logger().error(f"[gripper] 통신 속도 설정 실패: {baud}")
             self.port = None
             return
-        self._write_torque(True)
+        value, result, _ = self.packet.read1ByteTxRx(
+            self.port, self.dxl_id, ADDR_HARDWARE_ERROR_STATUS)
+        if result == 0 and value != 0:
+            self.get_logger().warn("[gripper] 시작할 때 하드웨어 에러가 남아 있어 초기화합니다.")
+            self.last_goal = None
+            self.recovery_count = 0
+            self._recover()
+        else:
+            self._write_torque(True)
         self.get_logger().info(f"[gripper] {device} @{baud} 연결, 토크 ON (ID {self.dxl_id})")
 
     def _write_torque(self, on: bool):
@@ -89,6 +112,48 @@ class GripperDynamixelNode(Node):
             self.get_logger().error(
                 f"[gripper] 토크 {'ON' if on else 'OFF'} 실패: "
                 f"{self.packet.getTxRxResult(result)}")
+
+    def _watchdog(self):
+        self._tick += 1
+        if self.port is None:
+            return
+        self._check_and_recover()
+        if self._tick % 5 == 0:
+            self._publish_present()
+
+    def _read_hw_error(self) -> int:
+        value, result, _ = self.packet.read1ByteTxRx(
+            self.port, self.dxl_id, ADDR_HARDWARE_ERROR_STATUS)
+        return value if result == 0 else 0
+
+    def _check_and_recover(self):
+        status = self._read_hw_error()
+        if status == 0 or self.recovery_count >= MAX_RECOVERY_TRY:
+            return
+        names = [name for bit, name in HW_ERROR_BITS.items() if status & (1 << bit)]
+        self.get_logger().error(
+            f"[gripper] 하드웨어 에러: {', '.join(names) or hex(status)} — 복구합니다")
+        self._recover()
+
+    def _recover(self):
+        """재부팅으로 에러 래치를 풀고 토크를 다시 켠 뒤 마지막 목표를 다시 보낸다."""
+        import time
+        self.recovery_count += 1
+        self.get_logger().warn(f"[gripper] 에러 초기화 시도 ({self.recovery_count}/{MAX_RECOVERY_TRY})")
+        result, _ = self.packet.reboot(self.port, self.dxl_id)
+        if result != 0:
+            self.get_logger().error(f"[gripper] 재부팅 실패: {self.packet.getTxRxResult(result)}")
+            return
+        time.sleep(0.5)             # 모터가 다시 뜰 시간
+        if self._read_hw_error() != 0:
+            self.get_logger().error("[gripper] 초기화 뒤에도 에러가 남았습니다 — 부하를 확인하세요.")
+            return
+        self._write_torque(True)
+        if self.last_goal is not None:
+            self.get_logger().info(f"[gripper] 마지막 목표 재전송: {self.last_goal}")
+            self.packet.write4ByteTxRx(self.port, self.dxl_id, ADDR_GOAL_POSITION, self.last_goal)
+        if self.recovery_count >= MAX_RECOVERY_TRY:
+            self.get_logger().error("[gripper] 복구 한도에 닿았습니다 — 기구 부하나 전원을 점검하세요.")
 
     def _publish_present(self):
         if self.port is None:
@@ -121,6 +186,8 @@ class GripperDynamixelNode(Node):
         if self.port is None:
             self.get_logger().warn(f"[gripper] (연결 없음) 목표 위치 {goal} 를 버립니다.")
             return
+        self.last_goal = goal
+        self.recovery_count = 0      # 새 명령이 오면 복구 횟수를 다시 센다
         result, error = self.packet.write4ByteTxRx(
             self.port, self.dxl_id, ADDR_GOAL_POSITION, goal)
         if result != 0:

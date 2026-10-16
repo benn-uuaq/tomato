@@ -76,14 +76,13 @@
 <script>
 // 부품 카드마다 붙는 추가 영역(미리보기, 촬영 결과, 그리퍼 조작)
 const EXTRA = {
-  camera: `
-    <label style="font-size:13px"><input type="checkbox" id="previewOn"
-      onchange="togglePreview()"> 미리보기</label>
+  vision: `
+    <div class="row"><button id="btnCapture" onclick="post('/capture')">촬영 시험 (최근접)</button></div>
+    <div id="result" class="sub" style="margin-top:8px"></div>
+    <label style="font-size:13px; display:block; margin-top:10px"><input type="checkbox" id="previewOn"
+      onchange="togglePreview()"> 카메라 미리보기</label>
     <img id="preview" class="preview" alt="" hidden>
     <div class="sub" id="previewMsg"></div>`,
-  vision: `
-    <div class="row"><button id="btnCapture" onclick="post('/capture')">촬영 시험</button></div>
-    <div id="result" class="sub" style="margin-top:8px"></div>`,
   gripper: `
     <div class="row">
       <button id="btnOpen" onclick="gripper(GRIP.open_value)">열기</button>
@@ -102,7 +101,7 @@ let previewTimer = null;
 function esc(s) { return String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 const STATE_TEXT = {ready:'준비됨', busy:'동작 중', starting:'켜는 중', warning:'확인 필요',
-                    error:'문제 있음', external:'패널 밖 실행', stopped:'꺼짐'};
+                    error:'문제 있음', stopped:'꺼짐'};
 
 function build(components) {
   const grid = document.getElementById('grid');
@@ -175,7 +174,7 @@ function render(s) {
   for (const c of s.components) {
     const pill = document.getElementById('pill-' + c.name);
     pill.className = 'pill ' + c.state;
-    pill.textContent = STATE_TEXT[c.state] || c.state;
+    pill.textContent = (STATE_TEXT[c.state] || c.state) + (c.external ? ' · 패널 밖' : '');
     document.getElementById('detail-' + c.name).textContent = c.detail;
     const log = document.getElementById('log-' + c.name);
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
@@ -187,12 +186,12 @@ function render(s) {
   const res = s.result;
   document.getElementById('result').innerHTML = !res ? '아직 촬영 결과가 없습니다.' :
     `마지막 결과 (${res.age_s}초 전) — 토마토 ${res.count}개` + (res.count ? `
-     <table><tr><th>#</th><th>X mm</th><th>Y mm</th><th>Z mm</th><th>무게 g</th><th>높이 mm</th></tr>
+     <table><tr><th>#</th><th>X mm</th><th>Y mm</th><th>Z mm (앞면)</th><th>무게 g</th></tr>
      ${res.tomatoes.map(t => `<tr><td>${t.index}</td><td>${t.x_mm}</td><td>${t.y_mm}</td>
-        <td>${t.z_mm}</td><td>${t.weight_g ?? '-'}</td><td>${t.height_mm ?? '-'}</td></tr>`).join('')}
+        <td>${t.z_mm}</td><td>${t.weight_g ?? '-'}</td></tr>`).join('')}
      </table>` : '');
   const vision = s.components.find(c => c.name === 'vision');
-  document.getElementById('btnCapture').disabled = !['ready', 'warning'].includes(vision.state);
+  document.getElementById('btnCapture').disabled = vision.state !== 'ready';
 
   // 그리퍼
   const grip = s.components.find(c => c.name === 'gripper');

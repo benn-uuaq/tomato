@@ -76,11 +76,7 @@ def test_filled_config_has_no_gaps():
         pick_wait_pose=pick_config.pose_to_si([400, 0, 400, 180, 0, 0]),
         place_point_pose=pick_config.pose_to_si([300, -200, 300, 180, 0, 0]),
         home_joint=[0.0, -1.57, 1.57, 0.0, 1.57, 0.0],
-        vision=pick_config.VisionConfig(
-            detection_topic="/vision/tomatoes",
-            trigger_topic="/vision/trigger",
-            hand_eye_xyz_mm=[0.0, 0.0, 50.0],
-        ),
+        vision=pick_config.VisionConfig(hand_eye_xyz_mm=[0.0, 0.0, 50.0]),
         gripper=pick_config.GripperConfig(backend="topic", topic="/gripper/close"),
     )
     assert cfg.missing() == []
@@ -354,9 +350,9 @@ def test_center_and_grip_move_in_tcp_plane():
 
 
 def test_descend_distance_from_camera_depth():
-    """거리 = 깊이 + 카메라 앞면(33) - 핑거 끝(172) + 더 들어갈 양(30)."""
+    """거리 = 깊이 + 카메라 앞면(33) - 핑거 끝(172) + 더 들어갈 양(47.5, 한양대 실측)."""
     cfg = pick_config.DescendConfig()
-    assert math.isclose(cfg.travel_mm(300.0), 191.0)
+    assert math.isclose(cfg.travel_mm(300.0), 208.5)
     fixed = pick_config.DescendConfig(mode="fixed", fixed_mm=120.0)
     assert fixed.travel_mm(999.0) == 120.0
 
@@ -373,3 +369,126 @@ def test_waypoint_path_program_goes_in_order():
     assert out.startswith("def go():") and out.endswith("end")
     assert "r=" not in out                       # 기본은 경유점마다 선다
     assert "r=0.0200" in motion.joint_path_program("b", [w1], target_joints=home, blend=0.02)
+
+
+
+# ---------------------------------------------------------------------------
+# 한양대 비전 업데이트 (2026-10) — 촬영 종류·그리퍼 4095·하강 보정
+# ---------------------------------------------------------------------------
+def test_descend_matches_hanyang_measurements():
+    """한양대 실측 5 회: 카메라 중심 자세에서 파지 자세까지 TCP 를 (깊이 − 91.5) mm 내렸다."""
+    cfg = pick_config.DescendConfig()
+    samples = [  # (앞면 깊이 mm, 실제 하강 mm) — gripper_moving_test, v2 test
+        (303.4, 450 - 238.1), (306.0, 450 - 235.5), (295.0, 450 - 246.5),
+        (299.0, 450 - 242.5), (301.0, 450 - 240.5)]
+    for depth, measured in samples:
+        assert math.isclose(cfg.travel_mm(depth), measured, abs_tol=0.05), (depth, measured)
+
+
+def test_gripper_closes_at_4095_by_default():
+    assert pick_config.GripperConfig().close_value == 4095
+    assert pick_config.GripperConfig().open_value == 0
+
+
+def test_capture_modes_match_hanyang_node_topics():
+    """시퀀스·브리지 클라이언트·브리지 서버가 같은 토픽 표를 쓴다."""
+    from elite_robot_controller.tomato.vision_interface import MODES
+    from elite_robot_controller.tomato.vision_bridge_client import SOURCES
+    for mode, (trigger, pose, weight, height) in MODES.items():
+        _, c_trigger, c_pose, c_weight, c_height = SOURCES[mode]
+        assert (trigger, pose, weight, height) == (c_trigger, c_pose, c_weight, c_height)
+    assert MODES["nearest"][0] == "/tomato/nearest_capture"
+    assert MODES["middle"][1] == "/tomato/middle_position"
+    cfg = pick_config.VisionConfig()
+    assert (cfg.first_capture, cfg.recapture) == ("nearest", "middle")
+    assert pick_config.VisionConfig(first_capture="bogus").configured is False
+
+
+def test_bridge_server_knows_the_same_sources():
+    """Orin 브리지(doosan_vision_grasp) 의 표도 같아야 한다 — 파일을 직접 읽어 비교한다."""
+    import ast
+    import os
+    from elite_robot_controller.tomato.vision_bridge_client import SOURCES
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "..", "..", "doosan_vision_grasp", "doosan_vision_grasp",
+                        "tomato_tcp_bridge.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    server = next(ast.literal_eval(node.value) for node in tree.body
+                  if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SOURCES")
+    assert {k: tuple(v) for k, v in server.items()} == {k: tuple(v) for k, v in SOURCES.items()}
+
+
+def test_vision_remote_ssh_command_is_key_only():
+    """[비전 시작] 의 SSH 는 비밀번호를 기다리지 않고, `~/` 는 원격 홈으로 푼다."""
+    from elite_robot_controller.tomato import vision_remote
+
+    cmd = vision_remote.ssh_command("nano", "192.168.1.10", "~/tomato_ws", "echo hi")
+    assert "BatchMode=yes" in cmd and cmd[-2] == "nano@192.168.1.10"
+    assert cmd[-1] == "cd ~/tomato_ws && echo hi"
+    assert vision_remote.workspace_cd("/opt/my ws") == "cd '/opt/my ws'"
+    assert "vision_run.sh --no-window" in vision_remote.START_REMOTE
+
+
+def test_vision_remote_uses_panel_then_falls_back_to_ssh(tmp_path, monkeypatch):
+    """패널(:포트) 이 떠 있으면 HTTP 로 켜고, 없으면 SSH 로 vision_run.sh 를 띄운다."""
+    import json
+    import os
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from elite_robot_controller.tomato import vision_remote
+
+    calls = []
+
+    class Panel(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _json(self, data):
+            body = json.dumps(data).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._json({"overall": {"ready": True, "text": "준비 완료"},
+                        "components": [{"label": "비전", "state": "ready", "detail": "ok"}]})
+
+        def do_POST(self):
+            calls.append(self.path)
+            self._json({"success": True, "message": "켰습니다"})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Panel)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        remote = vision_remote.VisionRemote(panel_port=server.server_address[1])
+        assert remote.start("127.0.0.1")["success"] and calls == ["/all/start"]
+        assert remote.stop("127.0.0.1")["success"] and calls[-1] == "/all/stop"
+        summary = vision_remote.summarize(remote.panel_status("127.0.0.1"))
+        assert summary["ready"] and summary["components"][0]["label"] == "비전"
+    finally:
+        server.shutdown()
+
+    # 패널이 없는 포트 -> 가짜 ssh 가 불린다.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    log = tmp_path / "ssh_args"
+    fake = tmp_path / "ssh"
+    fake.write_text(f'#!/bin/sh\necho "$@" > {log}\necho started\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    remote = vision_remote.VisionRemote(user="nano", panel_port=free_port)
+    assert remote.panel_status("127.0.0.1") is None
+    assert not vision_remote.summarize(None)["reachable"]
+    result = remote.start("127.0.0.1")
+    assert result["success"], result
+    assert "nano@127.0.0.1" in log.read_text() and "vision_run.sh" in log.read_text()
+
+    # 키가 등록되지 않았으면 그 이유와 고칠 명령을 알려 준다.
+    fake.write_text('#!/bin/sh\necho "nano@x: Permission denied (publickey,password)." >&2\nexit 255\n')
+    result = remote.start("127.0.0.1")
+    assert not result["success"] and "ssh-copy-id nano@127.0.0.1" in result["message"]
+    assert not remote.stop("127.0.0.1")["success"]     # 패널이 없으면 끌 것도 없다

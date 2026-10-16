@@ -48,7 +48,7 @@ from .vision_interface import VisionClient, camera_delta
 STEP_ORDER = [
     ("HOME_START", "1. 홈 자세로 이동"),
     ("MOVE_WAIT", "2. 대기 자세로 이동"),
-    ("TRIGGER", "3. 촬영 요청"),
+    ("TRIGGER", "3. 촬영 요청 (최근접 / 중앙 재측정)"),
     ("WAIT_DETECT", "3. 토마토 좌표 수신 대기"),
     ("CENTER", "4. 카메라 중심을 토마토에 맞춤 (TCP 기준)"),
     ("MEASURE", "5. 크기·무게 확인"),
@@ -163,7 +163,8 @@ class PickSequenceNode(Node):
             self.get_logger().warn("[설정] 아직 비어 있는 값: " + ", ".join(gaps))
         self.get_logger().info(
             f"[pick] 시퀀스 노드 시작 (회전 표기 {geometry.ORIENTATION}, "
-            f"정렬 {self.cfg.vision.align_frame} 기준, 하강 {self.cfg.descend.mode})")
+            f"정렬 {self.cfg.vision.align_frame} 기준, 하강 {self.cfg.descend.mode}, "
+            f"촬영 {self.cfg.vision.first_capture} -> {self.cfg.vision.recapture})")
 
     # ------------------------------------------------------------ 설정
     def _load_config(self):
@@ -388,7 +389,10 @@ class PickSequenceNode(Node):
         # 중심 맞추기의 기준이다.
         self.trigger_pose = list(self.tcp_pose) if self.tcp_pose else list(self.cfg.pick_wait_pose)
         self._trigger_stamp = self.now()
-        ok, note = self.vision.trigger()
+        # 대기 자세의 첫 촬영은 최근접, 카메라 중심을 맞춘 뒤에는 중앙 재측정.
+        self.capture_mode = (self.cfg.vision.first_capture if self._captures == 0
+                             else self.cfg.vision.recapture)
+        ok, note = self.vision.trigger(self.capture_mode)
         self.get_logger().info(note)
         if not ok:
             self.fail(note)
@@ -404,7 +408,14 @@ class PickSequenceNode(Node):
             return
         self._captures += 1
         if not self.vision.latest:
-            # 토마토가 없으면 오류가 아니라 작업 끝이다(연속 운전의 정상 종료).
+            if self._captures > 1:
+                # 중심을 맞춘 뒤 다시 찍었는데 없다 — 화면 가운데 칸 밖으로 벗어났거나
+                # 놓쳤다. 엉뚱한 토마토를 집지 않게 멈춘다.
+                self.fail("중심을 맞춘 뒤 재측정에서 토마토를 찾지 못했습니다 "
+                          "(화면 가운데 칸 밖이거나 놓침) — camera_axis_map 을 확인하세요.")
+                return
+            # 대기 자세에서 토마토가 없으면 오류가 아니라 작업 끝이다
+            # (연속 운전의 정상 종료).
             self.finish_reason = (f"토마토 {self.cycle_count}개를 옮기고 더 없어 마쳤습니다."
                                   if self.cycle_count else "검출된 토마토가 없습니다.")
             self.go("HOME_END")
@@ -420,7 +431,7 @@ class PickSequenceNode(Node):
         self.residual_mm = residual
         self.depth_mm = self.target.z * 1000.0
         self.get_logger().info(
-            f"[detect] {self._captures}번째 촬영 — 중심 오차 {residual:.1f} mm, "
+            f"[detect] {self._captures}번째 촬영({self.capture_mode}) — 중심 오차 {residual:.1f} mm, "
             f"깊이 {self.depth_mm:.1f} mm, 무게 {self.target.weight:.1f} g")
 
         if residual > self.cfg.vision.align_max_step_mm:
@@ -616,6 +627,7 @@ class PickSequenceNode(Node):
         self._captures = 0
         self._align_left = max(0, int(self.cfg.vision.align_iterations))
         self._trigger_stamp = 0.0
+        self.capture_mode = None
         self.finish_reason = ""
 
     # -------------------------------------------------------- 명령 처리
@@ -821,6 +833,7 @@ class PickSequenceNode(Node):
             "depth_mm": round(self.depth_mm, 1) if self.depth_mm is not None else None,
             "travel_mm": round(self.travel_mm, 1) if self.travel_mm is not None else None,
             "captures": self._captures,
+            "capture_mode": self.capture_mode,
             "alarm": self.last_alarm,
             "vision_link": self.vision_link,
             "missing": self.cfg.missing(),

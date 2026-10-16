@@ -5,16 +5,17 @@
 필요한 것만 주고받는다.
 
     [로봇 PC]                                    [Orin]
-    시퀀스 ─/tomato/capture─► 이 노드 ─{"cmd":"capture"}──► 브리지 ─► YOLO
+    시퀀스 ─/tomato/*_capture► 이 노드 ─{"cmd":"…capture"}─► 브리지 ─► YOLO
     시퀀스 ─/set_pos───────► 이 노드 ─{"cmd":"gripper"}──► 브리지 ─► 그리퍼
-    시퀀스 ◄─/tomato/* 3종── 이 노드 ◄─{"type":"result"}─── 브리지 ◄─ YOLO
+    시퀀스 ◄─/tomato/* 결과─ 이 노드 ◄─{"type":"result"}─── 브리지 ◄─ YOLO
 
 **로봇 PC 가 먼저 접속하는 쪽**이다. WSL2 는 기본(NAT) 네트워크에서 바깥으로
 나가는 연결은 그대로 되지만 들어오는 연결은 막혀 있다. 그래서 Orin 을 서버로
 두고 WSL 이 붙으면 Windows 쪽 포트포워딩·방화벽 설정이 필요 없다.
 
-받은 결과는 **원래 비전 노드와 똑같은 토픽 3 개**로 다시 내보낸다. 그래서
-시퀀스 노드는 비전이 같은 장비에 있든 다른 장비에 있든 똑같이 동작한다.
+받은 결과는 **원래 비전 노드와 똑같은 토픽**으로 다시 내보낸다(촬영 종류마다
+— 아래 SOURCES). 그래서 시퀀스 노드는 비전이 같은 장비에 있든 다른 장비에 있든
+똑같이 동작한다.
 
 프로토콜(JSON Lines, UTF-8) 은 `doosan_vision_grasp/tomato_tcp_bridge.py`
 머리말에 있다.
@@ -32,6 +33,21 @@ from geometry_msgs.msg import Pose, PoseArray
 from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, Float32MultiArray, Int32, String
 from std_srvs.srv import Trigger
+
+
+#: 촬영 종류 -> (브리지 명령, 트리거 토픽, 위치 토픽, 무게 토픽, 높이 토픽).
+#: 한양대 통합 비전 노드(tomato_vision_d435i*.py) 와 **같은 토픽 이름**이다 —
+#: 로봇 PC 에서도 그대로 다시 내보내므로 시퀀스는 비전이 어디 있든 같게 동작한다.
+SOURCES = {
+    "weight": ("capture", "/tomato/capture", "/tomato/center_positions",
+               "/tomato/estimated_weights", "/tomato/heights"),
+    "pick": ("pick_capture", "/tomato/pick_capture", "/tomato/pick_positions",
+             "/tomato/pick_weights", None),
+    "nearest": ("nearest_capture", "/tomato/nearest_capture", "/tomato/nearest_position",
+                "/tomato/nearest_weight", None),
+    "middle": ("middle_capture", "/tomato/middle_capture", "/tomato/middle_position",
+               "/tomato/middle_weight", None),
+}
 
 
 def result_to_messages(result: dict):
@@ -70,11 +86,7 @@ class VisionBridgeClient(Node):
         self.declare_parameter("reconnect_s", 2.0)
         #: 이만큼 아무것도 못 받으면 끊긴 것으로 본다. ping 을 그 1/3 간격으로 보낸다.
         self.declare_parameter("timeout_s", 6.0)
-        self.declare_parameter("capture_topic", "/tomato/capture")
         self.declare_parameter("gripper_topic", "/set_pos")
-        self.declare_parameter("pose_topic", "/tomato/center_positions")
-        self.declare_parameter("weight_topic", "/tomato/estimated_weights")
-        self.declare_parameter("height_topic", "/tomato/heights")
 
         self.host = str(self.get_parameter("host").value)
         self.port = int(self.get_parameter("port").value)
@@ -88,9 +100,14 @@ class VisionBridgeClient(Node):
         def param(name):
             return str(self.get_parameter(name).value)
 
-        self.pub_poses = self.create_publisher(PoseArray, param("pose_topic"), 10)
-        self.pub_weights = self.create_publisher(Float32MultiArray, param("weight_topic"), 10)
-        self.pub_heights = self.create_publisher(Float32MultiArray, param("height_topic"), 10)
+        # 촬영 종류마다 결과 토픽을 다시 낸다(위치 / 무게 / 높이).
+        self.result_pubs = {}
+        for source, (_, _, pose_topic, weight_topic, height_topic) in SOURCES.items():
+            self.result_pubs[source] = (
+                self.create_publisher(PoseArray, pose_topic, 10),
+                self.create_publisher(Float32MultiArray, weight_topic, 10),
+                self.create_publisher(Float32MultiArray, height_topic, 10) if height_topic else None,
+            )
         # 시퀀스와 UI 가 이 값을 보고 "비전 PC 끊김" 을 알린다.
         self.pub_link = self.create_publisher(Bool, "vision/bridge/connected", 10)
         # UI 가 "연결 중 / 연결됨 / 실패: 사유" 를 보여 주는 데 쓴다(JSON).
@@ -98,7 +115,10 @@ class VisionBridgeClient(Node):
         self.create_service(Trigger, "vision/bridge/connect", self.cb_connect)
         self.create_service(Trigger, "vision/bridge/disconnect", self.cb_disconnect)
 
-        self.create_subscription(Empty, param("capture_topic"), self.cb_capture, 10)
+        # 이 PC 에서 촬영 트리거를 내면 같은 명령을 Orin 브리지로 넘긴다.
+        for source, (command, trigger, _, _, _) in SOURCES.items():
+            self.create_subscription(
+                Empty, trigger, lambda _m, c=command: self.cb_capture(c), 10)
         self.create_subscription(Int32, param("gripper_topic"), self.cb_gripper, 10)
 
         self._sock = None
@@ -207,12 +227,20 @@ class VisionBridgeClient(Node):
                     "[bridge] 비전 PC 브리지가 protocol 1 입니다 — 그리퍼 명령을 모릅니다. "
                     "Orin 의 doosan_vision_grasp 를 갱신하세요.")
         elif kind == "result":
+            # protocol 1·2 브리지는 source 가 없다 — 그때는 무게 촬영 결과다.
+            source = message.get("source") or "weight"
+            if source not in self.result_pubs:
+                self.get_logger().warn(f"[bridge] 모르는 촬영 종류의 결과입니다: {source}")
+                return
             poses, weights, heights = result_to_messages(message)
+            pub_pose, pub_weight, pub_height = self.result_pubs[source]
             # 원래 비전 노드와 같은 순서(위치 -> 무게 -> 높이)로 내보낸다.
-            self.pub_poses.publish(poses)
-            self.pub_weights.publish(weights)
-            self.pub_heights.publish(heights)
-            self.get_logger().info(f"[bridge] 검출 결과 수신: 토마토 {message.get('count', 0)}개")
+            pub_pose.publish(poses)
+            pub_weight.publish(weights)
+            if pub_height is not None:
+                pub_height.publish(heights)
+            self.get_logger().info(
+                f"[bridge] 검출 결과 수신 ({source}): 토마토 {message.get('count', 0)}개")
         elif kind == "ack":
             self.get_logger().info(f"[bridge] 비전 PC 확인: {message}")
         elif kind == "error":
@@ -234,9 +262,14 @@ class VisionBridgeClient(Node):
         self._drop("전송 실패로 끊김")
         return False
 
-    def cb_capture(self, _msg):
-        if not self._send({"cmd": "capture"}):
-            self.get_logger().error("[bridge] 비전 PC 에 연결되어 있지 않아 촬영 요청을 못 보냈습니다.")
+    def cb_capture(self, command: str):
+        if not self._send({"cmd": command}):
+            self.get_logger().error(
+                f"[bridge] 비전 PC 에 연결되어 있지 않아 촬영 요청({command})을 못 보냈습니다.")
+        elif command != "capture" and self._protocol is not None and int(self._protocol) < 3:
+            self.get_logger().warn(
+                f"[bridge] 비전 PC 브리지가 protocol {self._protocol} 입니다 — {command} 를 "
+                "모릅니다. Orin 의 doosan_vision_grasp 를 갱신하세요.")
 
     def cb_gripper(self, msg):
         position = int(msg.data)

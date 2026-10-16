@@ -48,22 +48,15 @@ def pose_to_human(pose_si) -> list:
 
 @dataclass
 class VisionConfig:
-    """비전 쪽 연결 정보. 기본값은 `doosan_vision_grasp` 의 토마토 노드에 맞췄다."""
+    """비전 설정. 토픽은 촬영 종류(vision_interface.MODES)로 정해진다."""
 
-    #: 토마토 위치가 오는 토픽 (geometry_msgs/PoseArray, m, 카메라 optical frame).
-    detection_topic: str = "/tomato/center_positions"
-    #: 그 토픽의 메시지 타입. 비우면 PoseArray 로 본다.
-    detection_type: str = "geometry_msgs/PoseArray"
-    #: 무게 [g] 와 높이 [m]. 위치와 **같은 순서**로 온다.
-    weight_topic: str = "/tomato/estimated_weights"
-    height_topic: str = "/tomato/heights"
-    #: 카메라를 한 번 찍게 만드는 트리거 토픽.
-    trigger_topic: str = "/tomato/capture"
-    #: 트리거 메시지 타입: "empty" | "bool".
-    trigger_type: str = "empty"
-    #: 트리거를 서비스로 쓸 때의 이름(std_srvs/Trigger). 토픽과 둘 중 하나만.
-    trigger_service: str = ""
-    #: 트리거 후 검출 결과를 기다리는 한도 [s]. 촬영 자체가 1 초쯤 걸린다.
+    #: 3 단계 첫 촬영 — 대기 자세에서 찾는다. "nearest"(가장 가까운 1 개, 기본)
+    #: | "pick"(전체 중 첫 번째) | "weight"(예전 면적·높이 노드).
+    first_capture: str = "nearest"
+    #: 4 단계 뒤 재측정 — 카메라 중심을 맞춘 다음. "middle"(화면 3x3 가운데 칸의
+    #: 최근접 1 개, 기본) | "nearest" | ...  여기서 받은 무게가 정확한 값이다.
+    recapture: str = "middle"
+    #: 촬영 후 결과를 기다리는 한도 [s]. 한양대 노드는 1.5 초 측정한다.
     detection_timeout_s: float = 10.0
     #: 검출 좌표 해석 방식: "camera_delta"(기본) | "camera" | "tool" | "base".
     detection_frame: str = "camera_delta"
@@ -93,8 +86,9 @@ class VisionConfig:
 
     @property
     def configured(self) -> bool:
-        """검출 토픽이라도 정해져야 시퀀스를 돌릴 수 있다."""
-        return bool(self.detection_topic)
+        """두 촬영 종류가 모두 아는 것이어야 시퀀스를 돌릴 수 있다."""
+        from .vision_interface import MODES
+        return self.first_capture in MODES and self.recapture in MODES
 
     @property
     def hand_eye_pose(self) -> list:
@@ -120,8 +114,9 @@ class GripperConfig:
     backend: str = "int_topic"
     #: 그리퍼 명령 토픽. int_topic 이면 Int32, topic 이면 Bool.
     topic: str = "/set_pos"
-    #: int_topic 일 때의 목표 위치 값(0~4095). README 기준 3185 가 파지, 0 이 열림.
-    close_value: int = 3185
+    #: int_topic 일 때의 목표 위치 값(0~4095). README.odt(2026-10) 기준 4095 가 파지,
+    #: 0 이 열림(예전 3185).
+    close_value: int = 4095
     open_value: int = 0
     #: backend 가 serial 일 때(Orin nano 직결). 포트와 보드레이트, 명령 문자열.
     serial_port: str = ""
@@ -165,7 +160,9 @@ class DescendConfig:
     mode: str = "vision"
     camera_z_offset_mm: float = 33.0
     gripper_length_mm: float = 172.0
-    grasp_depth_mm: float = 30.0
+    #: 한양대 실측 5 회(2026-10): 카메라 중심 자세에서 파지 자세까지 TCP 를 늘
+    #: (토마토 앞면 깊이 − 91.5) mm 내렸다 -> 33 − 172 + g = −91.5 -> g = 47.5.
+    grasp_depth_mm: float = 47.5
     fixed_mm: float = 100.0
     #: 계산한 이동이 이보다 길면 거절한다 — 깊이를 잘못 쟀을 때 벽으로 밀고
     #: 들어가지 않게 하는 안전장치(고정 하강 한계와는 다르다).
@@ -241,9 +238,7 @@ class PickConfig:
         if not self.place_pose_set:
             gaps.append("place_point_pose")
         if not self.vision.configured:
-            gaps.append("vision.detection_topic")
-        if not (self.vision.trigger_topic or self.vision.trigger_service):
-            gaps.append("vision.trigger_topic 또는 vision.trigger_service")
+            gaps.append("vision.first_capture / vision.recapture")
         if self.vision.detection_frame == "camera" and not self.vision.hand_eye_set:
             gaps.append("vision.hand_eye_xyz_mm / hand_eye_rpy_deg")
         if not self.gripper.configured:
@@ -272,13 +267,8 @@ PARAMETER_DEFAULTS = [
     ("settle_time_s", 0.3),
     ("move_timeout_s", 40.0),
     ("orientation_format", "rpy"),
-    ("vision.detection_topic", "/tomato/center_positions"),
-    ("vision.detection_type", "geometry_msgs/PoseArray"),
-    ("vision.weight_topic", "/tomato/estimated_weights"),
-    ("vision.height_topic", "/tomato/heights"),
-    ("vision.trigger_topic", "/tomato/capture"),
-    ("vision.trigger_type", "empty"),
-    ("vision.trigger_service", ""),
+    ("vision.first_capture", "nearest"),
+    ("vision.recapture", "middle"),
     ("vision.detection_timeout_s", 10.0),
     ("vision.detection_frame", "camera_delta"),
     ("vision.camera_axis_map", ["-y", "-x"]),
@@ -291,7 +281,7 @@ PARAMETER_DEFAULTS = [
     ("vision.hand_eye_rpy_deg", [0.0, 0.0, 0.0]),
     ("gripper.backend", "int_topic"),
     ("gripper.topic", "/set_pos"),
-    ("gripper.close_value", 3185),
+    ("gripper.close_value", 4095),
     ("gripper.open_value", 0),
     ("gripper.serial_port", ""),
     ("gripper.serial_baud", 115200),
@@ -303,7 +293,7 @@ PARAMETER_DEFAULTS = [
     ("descend.mode", "vision"),
     ("descend.camera_z_offset_mm", 33.0),
     ("descend.gripper_length_mm", 172.0),
-    ("descend.grasp_depth_mm", 30.0),
+    ("descend.grasp_depth_mm", 47.5),
     ("descend.fixed_mm", 100.0),
     ("descend.max_travel_mm", 250.0),
 ]
@@ -339,13 +329,8 @@ def load(node) -> PickConfig:
         move_timeout_s=float(value("move_timeout_s")),
         orientation_format=str(value("orientation_format")),
         vision=VisionConfig(
-            detection_topic=str(value("vision.detection_topic")),
-            detection_type=str(value("vision.detection_type")),
-            weight_topic=str(value("vision.weight_topic")),
-            height_topic=str(value("vision.height_topic")),
-            trigger_topic=str(value("vision.trigger_topic")),
-            trigger_type=str(value("vision.trigger_type")),
-            trigger_service=str(value("vision.trigger_service")),
+            first_capture=str(value("vision.first_capture")),
+            recapture=str(value("vision.recapture")),
             detection_timeout_s=float(value("vision.detection_timeout_s")),
             detection_frame=str(value("vision.detection_frame")),
             camera_axis_map=[str(v) for v in value("vision.camera_axis_map")],

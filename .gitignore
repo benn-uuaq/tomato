@@ -12,6 +12,7 @@ __pycache__/
 
 # 원본 자료 — 저장소에 올리지 않는다
 doosan_manipulator.zip
+doosan_manipulator.tar.gz
 # README.odt: 장비 비밀번호가 적혀 있다
 README.odt
 # documents/: 내부 계획서

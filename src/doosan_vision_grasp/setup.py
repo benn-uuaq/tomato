@@ -20,7 +20,11 @@ setup(
         # 그래서 소스 파일 자체를 share 에 설치해, launch 가 워크스페이스
         # 경로를 몰라도 찾을 수 있게 한다.
         (os.path.join('share', package_name, 'scripts'),
-            ['doosan_vision_grasp/tomato_area_d435i_v2.py']),
+            ['doosan_vision_grasp/tomato_area_d435i_v2.py',
+             # 2026-10 한양대 통합 비전 노드 (위치·최근접·중앙·무게 트리거)
+             'doosan_vision_grasp/tomato_vision_d435i.py',
+             'doosan_vision_grasp/tomato_vision_d435i_v2.py',
+             'doosan_vision_grasp/tomato_vision_d435i_v3.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

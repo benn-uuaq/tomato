@@ -14,6 +14,9 @@ UI 는 `pick/status` 를 그대로 보여주고, 버튼은 `pick/*` 서비스를
    `vision_bridge_client.host`)
 2. 각자의 connect 서비스를 부른다.
 마지막에 쓴 주소는 `~/.tomato_pick/connection.yaml` 에 남겨 다음에 미리 채운다.
+
+[비전 시작] / [비전 정지] 는 Orin 쪽을 켜고 끈다(`vision_remote`). Orin 에 가서
+`vision_run.sh` 를 따로 칠 필요가 없다 — 로봇 PC 에서는 `robot_run.sh` 하나면 된다.
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from . import connection
-from .pick_sequence_node import STEPS
+from .pick_sequence_node import IDLE_STATES, STEPS
+from .vision_remote import VisionRemote, summarize
 
 #: UI 버튼 -> 서비스 이름.
 COMMANDS = {
@@ -78,6 +82,13 @@ class PickUiNode(Node):
         self.declare_parameter("bridge_node", "vision_bridge_client")
         #: 로봇 연결은 소켓 세 개를 차례로 여느라 실패할 때 몇 초 걸린다.
         self.declare_parameter("connect_timeout_s", 12.0)
+        #: True 면 띄우자마자 기억해 둔 주소로 [연결] 을 누른 것처럼 한다
+        #: (robot_run.sh --connect). 다른 노드가 뜰 때까지 잠깐 기다렸다가 건다.
+        self.declare_parameter("connect_on_start", False)
+        # [비전 시작] — Orin 의 비전 패널(HTTP) 이 없으면 SSH(키 인증) 로 vision_run.sh 를 띄운다.
+        self.declare_parameter("orin_user", os.environ.get("ORIN_USER", "nano"))
+        self.declare_parameter("orin_workspace", os.environ.get("ORIN_WS", "~/tomato_ws"))
+        self.declare_parameter("vision_panel_port", 8081)
 
         self.connection_file = str(self.get_parameter("connection_file").value)
         remembered = connection.load(self.connection_file)
@@ -88,6 +99,13 @@ class PickUiNode(Node):
         }
         self.last_connect = {}          # 마지막 [연결] 결과 문구
         self.vision_state = None        # 브리지 클라이언트가 알려 주는 상태
+        self.remote = VisionRemote(
+            user=str(self.get_parameter("orin_user").value),
+            workspace=str(self.get_parameter("orin_workspace").value),
+            panel_port=int(self.get_parameter("vision_panel_port").value))
+        self.vision_panel = summarize(None)     # Orin 비전 패널 상태(요약)
+        self.vision_action = ""                 # 마지막 [비전 시작/정지] 결과 문구
+        self._vision_busy = threading.Lock()    # 버튼을 연달아 눌러도 한 번만
 
         self.status = {"state": "IDLE", "step": STEPS["IDLE"], "connected": False}
         self._group = ReentrantCallbackGroup()
@@ -135,6 +153,11 @@ class PickUiNode(Node):
         threading.Thread(target=self._server.serve_forever,
                          name="pick-ui-http", daemon=True).start()
         self.get_logger().info(f"[ui] http://{host}:{port} 에서 화면을 엽니다.")
+        if self.get_parameter("connect_on_start").value:
+            threading.Thread(target=self._connect_when_ready, name="auto-connect",
+                             daemon=True).start()
+        threading.Thread(target=self._watch_vision_panel, name="vision-panel-watch",
+                         daemon=True).start()
 
     def _on_status(self, msg):
         try:
@@ -230,6 +253,20 @@ class PickUiNode(Node):
             messages.append(f"{label} {value:g} mm")
         return {"success": True, "message": "저장: " + ", ".join(messages)}
 
+    def _connect_when_ready(self):
+        """노드들이 뜰 때까지(서비스가 보일 때까지) 기다렸다가 기억한 주소로 연결한다."""
+        import time
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            if self._set_param_ready() and self.link_clients[("robot", "connect")].service_is_ready():
+                break
+            time.sleep(0.5)
+        result = self.connect(dict(self.addresses))
+        self.get_logger().info(f"[ui] 시작하며 연결: {result['message']}")
+
+    def _set_param_ready(self) -> bool:
+        return self.param_clients["robot"].service_is_ready()
+
     def disconnect(self) -> dict:
         results = {"robot": self._trigger("robot", "disconnect", 5.0)}
         if self.has_bridge:
@@ -239,6 +276,78 @@ class PickUiNode(Node):
             "success": all(value["success"] for value in results.values()),
             "message": " / ".join(value["message"] for value in results.values()),
         }
+
+    # ------------------------------------------------------------ Orin 비전 켜기/끄기
+    def _vision_host(self, body: dict) -> tuple:
+        """화면에 넣은 Orin IP 를 검사하고 기억한다. (ok, host 또는 사유)"""
+        ok, value, reason = connection.validate_host(
+            body.get("vision_host") or self.addresses["vision_host"])
+        if not ok:
+            return False, f"Orin IP: {reason}"
+        if value != self.addresses["vision_host"]:
+            self.addresses["vision_host"] = value
+            try:
+                connection.save(self.connection_file, self.addresses)
+            except Exception as exc:
+                self.get_logger().warn(f"[ui] 주소를 기억하지 못했습니다: {exc}")
+        return True, value
+
+    def vision_start(self, body: dict) -> dict:
+        """[비전 시작] — Orin 의 카메라·비전·그리퍼·외부 통신을 켜고, 브리지를 그쪽에 붙인다."""
+        if not self.has_bridge:
+            return {"success": False, "message": "비전이 이 장비에 있어(브리지 없음) Orin 을 켤 일이 없습니다."}
+        ok, host = self._vision_host(body)
+        if not ok:
+            return {"success": False, "message": host}
+        if not self._vision_busy.acquire(blocking=False):
+            return {"success": False, "message": "이미 Orin 비전을 켜는 중입니다."}
+        try:
+            self.vision_action = f"Orin({host}) 비전을 켜는 중..."
+            result = self.remote.start(host)
+            if result["success"]:
+                # 브리지 서버가 뜰 때까지 2초마다 다시 붙으므로 지금 걸어 두면 된다.
+                ok, reason = self._set_param("vision", "host", host)
+                link = (self._trigger("vision", "connect", 3.0) if ok else
+                        {"success": False, "message": f"Orin 주소 설정 실패: {reason}"})
+                self.last_connect["vision"] = link["message"]
+                if not link["success"]:
+                    result = {"success": False, "message": result["message"] + " / " + link["message"]}
+            self.vision_action = result["message"]
+            self.get_logger().info(f"[ui] 비전 시작: {result['message']}")
+            return result
+        finally:
+            self._vision_busy.release()
+
+    def vision_stop(self, body: dict) -> dict:
+        """[비전 정지] — Orin 패널이 켠 것만 내린다. 작업 중이면 막는다."""
+        if not self.has_bridge:
+            return {"success": False, "message": "비전이 이 장비에 있어(브리지 없음) Orin 을 끌 일이 없습니다."}
+        state = self.status.get("state", "IDLE")
+        if state not in IDLE_STATES:
+            return {"success": False,
+                    "message": f"작업 중({self.status.get('step', state)})에는 비전을 끌 수 없습니다 — 먼저 [정지]."}
+        ok, host = self._vision_host(body)
+        if not ok:
+            return {"success": False, "message": host}
+        result = self.remote.stop(host)
+        if result["success"]:
+            # 일부러 끈 것이니 "접속 실패 — 다시 시도 중" 을 띄우지 않게 브리지도 쉰다.
+            link = self._trigger("vision", "disconnect", 3.0)
+            self.last_connect["vision"] = link["message"]
+        self.vision_action = result["message"]
+        self.get_logger().info(f"[ui] 비전 정지: {result['message']}")
+        return result
+
+    def _watch_vision_panel(self):
+        """Orin 비전 패널의 상태를 계속 읽어 화면에 보여 준다(브리지가 있을 때만)."""
+        import time
+        while rclpy.ok():
+            if not self.has_bridge:
+                time.sleep(1.0)
+                continue
+            status = self.remote.panel_status(self.addresses["vision_host"], timeout=1.5)
+            self.vision_panel = summarize(status)
+            time.sleep(1.0 if status else 2.0)
 
     def call(self, name: str) -> dict:
         """버튼 하나를 서비스 호출로 바꾼다. 응답을 그대로 화면에 돌려준다."""
@@ -267,6 +376,8 @@ class PickUiNode(Node):
             "vision_state": self.vision_state,
             "last": self.last_connect,
         }
+        data["vision_panel"] = dict(self.vision_panel, action=self.vision_action,
+                                    starting=self._vision_busy.locked())
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     def _make_handler(node_self):
@@ -308,6 +419,10 @@ class PickUiNode(Node):
                     result = node.disconnect()
                 elif self.path == "/settings":
                     result = node.save_settings(self._json_body())
+                elif self.path == "/vision/start":
+                    result = node.vision_start(self._json_body())
+                elif self.path == "/vision/stop":
+                    result = node.vision_stop(self._json_body())
                 elif self.path.startswith("/command/"):
                     result = node.call(self.path[len("/command/"):])
                 else:

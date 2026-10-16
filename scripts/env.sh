@@ -29,15 +29,25 @@ export ROBOT_IP="${ROBOT_IP:-192.168.1.200}"     # Elite CS616 컨트롤러
 export VISION_HOST="${VISION_HOST:-192.168.1.10}" # 비전 PC(Orin) — 로봇 PC 가 여기 접속한다
 export BRIDGE_PORT="${BRIDGE_PORT:-9000}"         # 비전 팀 tomato_tcp_bridge 기본 포트
 
-# 두 장비의 ROS 가 서로를 보지 않게 한다. 둘을 잇는 건 TCP 브리지 하나뿐이다
-# — 같은 토픽 이름이 양쪽에 있어 서로 보이면 명령이 메아리처럼 되돌아온다.
-# (WSL2 의 NAT 네트워크는 어차피 DDS 탐색 패킷이 바깥과 오가지 못한다.)
-export ROS_LOCALHOST_ONLY=1
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}"
+# ROS(DDS) 설정 — 장비마다 다르다.
+#   Orin : **새 터미널과 같은 기본값**(도메인 0, 모든 인터페이스). 한양대 쪽이
+#          자기 터미널에서 `ros2 launch doosan_vision_grasp ...` 로 켠 비전 노드나
+#          dyn_test 가 이 워크스페이스의 패널·브리지에 보여야 하기 때문이다.
+#   PC   : 다른 장비의 ROS 를 보지 않게 막는다. 둘을 잇는 건 TCP 브리지 하나뿐이다
+#          — 같은 토픽 이름이 양쪽에 있어 서로 보이면 명령이 메아리처럼 되돌아온다.
+#          (WSL2 의 NAT 네트워크는 어차피 DDS 탐색 패킷이 바깥과 오가지 못한다.)
+if [ "$TOMATO_ROLE" = "orin" ]; then
+    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
+    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
+else
+    export ROS_LOCALHOST_ONLY=1
+    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}"
+fi
 
 export TOMATO_VENV="$TOMATO_WS/venv"
 export TOMATO_VENV_PY="$TOMATO_VENV/bin/python3"
-export TOMATO_MODEL="${TOMATO_MODEL:-$TOMATO_WS/models/tomato_v1.pt}"
+export TOMATO_MODEL="${TOMATO_MODEL:-$TOMATO_WS/models/tomato_v1.pt}"       # 무게 추정 모델
+export TOMATO_PICK_MODEL="${TOMATO_PICK_MODEL:-$TOMATO_WS/models/best.pt}"     # 위치 인식 모델 (2026-10)
 
 # ---------------------------------------------------------------- ROS 2
 if [ -f /opt/ros/humble/setup.bash ]; then

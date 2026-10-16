@@ -1,17 +1,22 @@
 """비전 쪽과 맞닿는 곳을 여기 한 파일에 모은다.
 
-지금 붙는 상대는 `doosan_vision_grasp` 의 `tomato_area_d435i_v2` 노드다
-(README.odt 와 같은 인터페이스).
+지금 붙는 상대는 한양대 통합 비전 노드 `tomato_vision_d435i*.py`(2026-10)다.
+트리거 하나에 결과 토픽이 정해져 있다(위치는 **m, 카메라 optical frame**,
+무게 g, 높이 m). 검출이 0 개여도 빈 목록을 보내 주므로 로봇이 매달리지 않는다.
 
-| 방향 | 토픽 | 타입 | 단위 |
-| --- | --- | --- | --- |
-| 로봇 -> 비전 | `/tomato/capture` | `std_msgs/Empty` | 트리거. 약 1 초간 측정한다 |
-| 비전 -> 로봇 | `/tomato/center_positions` | `geometry_msgs/PoseArray` | **m**, 카메라 optical frame |
-| 비전 -> 로봇 | `/tomato/estimated_weights` | `std_msgs/Float32MultiArray` | **g** |
-| 비전 -> 로봇 | `/tomato/heights` | `std_msgs/Float32MultiArray` | **m** |
+| 촬영 (MODES) | 트리거 | 위치 | 무게 | 높이 |
+| --- | --- | --- | --- | --- |
+| nearest — 가장 가까운 1 개 | `/tomato/nearest_capture` | `/tomato/nearest_position` | `/tomato/nearest_weight` | - |
+| middle — 화면 3x3 가운데 칸의 최근접 1 개 | `/tomato/middle_capture` | `/tomato/middle_position` | `/tomato/middle_weight` | - |
+| pick — 전체, 가까운 순 | `/tomato/pick_capture` | `/tomato/pick_positions` | `/tomato/pick_weights` | - |
+| weight — 면적·높이 무게 (아래를 볼 때만) | `/tomato/capture` | `/tomato/center_positions` | `/tomato/estimated_weights` | `/tomato/heights` |
 
-세 토픽은 **같은 순서**로 한 번씩 발행된다(i 번째 pose 와 i 번째 무게가 같은
-토마토다). 검출이 0 개여도 빈 목록을 보내 주므로 로봇이 매달리지 않는다.
+시퀀스는 대기 자세에서 `nearest` 로 찾고, 카메라 중심을 맞춘 뒤 `middle` 로 다시
+잰다(`vision.first_capture`, `vision.recapture`). 위치 Z 는 토마토 **앞면** 깊이다
+(마스크 깊이의 10 백분위 — 한양대 노드 `depth_percentile`).
+
+비전이 Orin 에 있을 때는 로봇 PC 의 브리지 클라이언트가 같은 토픽 이름으로
+다시 내보내 주므로 이 파일은 차이를 모른다.
 
 좌표 변환에는 두 가지 방식이 있다(`vision.detection_frame`).
 
@@ -60,6 +65,19 @@ class Detection:
 
 #: 검출 토픽 타입을 지정하지 않았을 때의 기본값. 지금 쓰는 비전 노드에 맞춘다.
 DEFAULT_TYPE = "geometry_msgs/msg/PoseArray"
+
+#: 촬영 종류 -> (트리거, 위치, 무게, 높이) 토픽. 한양대 통합 비전 노드와 같다.
+MODES = {
+    "nearest": ("/tomato/nearest_capture", "/tomato/nearest_position",
+                "/tomato/nearest_weight", None),
+    "middle": ("/tomato/middle_capture", "/tomato/middle_position",
+               "/tomato/middle_weight", None),
+    "pick": ("/tomato/pick_capture", "/tomato/pick_positions", "/tomato/pick_weights", None),
+    "weight": ("/tomato/capture", "/tomato/center_positions",
+               "/tomato/estimated_weights", "/tomato/heights"),
+}
+MODE_LABELS = {"nearest": "최근접 촬영", "middle": "중앙 재측정",
+               "pick": "전체 촬영", "weight": "무게 촬영"}
 #: Float32MultiArray 로 받을 때의 묶음 크기 [x, y, z, 지름, 무게].
 DEFAULT_STRIDE = 5
 #: 축 이름 -> (성분 번호, 부호).
@@ -180,11 +198,12 @@ def detection_to_base(detection: Detection, tool_pose, config) -> list:
 
 
 class VisionClient:
-    """검출 3 종 구독과 트리거 발행을 맡는다. 시퀀스 노드는 이 객체만 쓴다.
+    """촬영 트리거를 내고 그 촬영의 결과(위치·무게·높이)를 모은다.
 
-    한 번의 촬영 결과는 세 토픽으로 나뉘어 **거의 동시에** 들어온다. 위치가
-    먼저 와도 무게가 아직 안 왔을 수 있어, 위치를 받은 뒤 `merge_grace_s`
-    만큼 기다렸다가 하나로 합쳐 내보낸다.
+    한 번의 촬영 결과는 토픽 여러 개로 나뉘어 **거의 동시에** 들어온다. 위치가
+    먼저 와도 무게가 아직 안 왔을 수 있어, 위치를 받은 뒤 `MERGE_GRACE_S`
+    만큼 기다렸다가 하나로 합쳐 내보낸다. **이번에 요청한 촬영 종류의 결과만**
+    받는다 — 비전 패널에서 누른 시험 촬영 같은 다른 결과는 버린다.
     """
 
     #: 위치를 받은 뒤 무게·높이를 기다리는 시간 [s].
@@ -196,58 +215,38 @@ class VisionClient:
         self.on_detections = on_detections
         self.latest = []            # 합쳐진 Detection 목록
         self.latest_stamp = 0.0     # 합쳐진 시각 [s]
-        self._pending = None        # 위치만 먼저 받아 둔 목록
+        self.latest_mode = None
+        self.expect = None          # 지금 기다리는 촬영 종류
+        self._pending = None
         self._pending_stamp = 0.0
         self._weights = []
         self._heights = []
-        self._trigger_pub = None
-        self._trigger_client = None
-        self._setup()
-
-    # ------------------------------------------------------------- 구성
-    def _setup(self):
-        cfg = self.config
-        if cfg.detection_topic:
-            type_name = cfg.detection_type or DEFAULT_TYPE
-            try:
-                msg_type = import_message(type_name)
-            except Exception as exc:
-                self.node.get_logger().error(
-                    f"[vision] 검출 메시지 타입을 못 불러왔습니다({type_name}): {exc}")
-                return
-            self.node.create_subscription(msg_type, cfg.detection_topic, self._on_msg, 10)
-            self.node.get_logger().info(
-                f"[vision] 검출 구독: {cfg.detection_topic} ({type_name})")
-        else:
-            self.node.get_logger().warn(
-                "[vision] detection_topic 이 비어 있습니다 — 비전 정보를 받지 못합니다.")
-
-        from std_msgs.msg import Float32MultiArray
-        if cfg.weight_topic:
-            self.node.create_subscription(
-                Float32MultiArray, cfg.weight_topic, self._on_weights, 10)
-        if cfg.height_topic:
-            self.node.create_subscription(
-                Float32MultiArray, cfg.height_topic, self._on_heights, 10)
-
-        if cfg.trigger_topic:
-            self._trigger_pub = self.node.create_publisher(
-                self._trigger_msg_type(), cfg.trigger_topic, 10)
-            self.node.get_logger().info(
-                f"[vision] 트리거 발행: {cfg.trigger_topic} ({cfg.trigger_type})")
-        if cfg.trigger_service:
-            from std_srvs.srv import Trigger
-            self._trigger_client = self.node.create_client(Trigger, cfg.trigger_service)
-
-    def _trigger_msg_type(self):
-        if self.config.trigger_type == "bool":
-            from std_msgs.msg import Bool
-            return Bool
-        from std_msgs.msg import Empty
-        return Empty
+        self._trigger_pubs = {}
+        from std_msgs.msg import Empty, Float32MultiArray
+        msg_type = import_message(DEFAULT_TYPE)
+        modes = []
+        for mode in (config.first_capture, config.recapture):
+            if mode in MODES and mode not in modes:
+                modes.append(mode)
+        for mode in modes:
+            trigger, pose_topic, weight_topic, height_topic = MODES[mode]
+            self._trigger_pubs[mode] = node.create_publisher(Empty, trigger, 10)
+            node.create_subscription(
+                msg_type, pose_topic, lambda m, md=mode: self._on_msg(md, m), 10)
+            node.create_subscription(
+                Float32MultiArray, weight_topic,
+                lambda m, md=mode: self._on_array(md, "_weights", m), 10)
+            if height_topic:
+                node.create_subscription(
+                    Float32MultiArray, height_topic,
+                    lambda m, md=mode: self._on_array(md, "_heights", m), 10)
+            node.get_logger().info(
+                f"[vision] {MODE_LABELS[mode]}: {trigger} -> {pose_topic}")
 
     # ------------------------------------------------------------- 수신
-    def _on_msg(self, msg):
+    def _on_msg(self, mode, msg):
+        if mode != self.expect:
+            return
         try:
             detections = parse_detections(msg)
         except Exception as exc:
@@ -255,15 +254,10 @@ class VisionClient:
             return
         self._pending = detections
         self._pending_stamp = self._now()
-        # 위치만 따로 오는 형식(PoseArray)이 아니면 곧바로 확정한다.
-        if not (self.config.weight_topic or self.config.height_topic):
-            self._commit()
 
-    def _on_weights(self, msg):
-        self._weights = list(msg.data)
-
-    def _on_heights(self, msg):
-        self._heights = list(msg.data)
+    def _on_array(self, mode, attr, msg):
+        if mode == self.expect:
+            setattr(self, attr, list(msg.data))
 
     def _now(self) -> float:
         return self.node.get_clock().now().nanoseconds / 1e9
@@ -275,10 +269,10 @@ class VisionClient:
             if i < len(self._weights):
                 det.weight = float(self._weights[i])
             if i < len(self._heights):
-                # /tomato/heights 는 m 로 온다 -> mm 로 둔다.
-                det.height = float(self._heights[i]) * 1000.0
+                det.height = float(self._heights[i]) * 1000.0   # m -> mm
         self.latest = detections
         self.latest_stamp = self._now()
+        self.latest_mode = self.expect
         self._pending = None
         if self.on_detections:
             self.on_detections(detections)
@@ -299,20 +293,14 @@ class VisionClient:
         self._heights = []
 
     # ------------------------------------------------------------- 트리거
-    def trigger(self) -> tuple:
+    def trigger(self, mode: str = None) -> tuple:
         """카메라를 찍게 한다. (성공, 안내문) 을 돌려준다."""
-        if self._trigger_pub is not None:
-            if self.config.trigger_type == "bool":
-                from std_msgs.msg import Bool
-                self._trigger_pub.publish(Bool(data=True))
-            else:
-                from std_msgs.msg import Empty
-                self._trigger_pub.publish(Empty())
-            return True, f"[vision] 트리거 발행: {self.config.trigger_topic}"
-        if self._trigger_client is not None:
-            if not self._trigger_client.service_is_ready():
-                return False, f"[vision] 트리거 서비스 대기 중: {self.config.trigger_service}"
-            from std_srvs.srv import Trigger
-            self._trigger_client.call_async(Trigger.Request())
-            return True, f"[vision] 트리거 서비스 호출: {self.config.trigger_service}"
-        return False, "[vision] 트리거 토픽/서비스가 설정되지 않았습니다."
+        mode = mode or self.config.first_capture
+        pub = self._trigger_pubs.get(mode)
+        if pub is None:
+            return False, f"[vision] 모르는 촬영 종류입니다: {mode}"
+        from std_msgs.msg import Empty
+        self.clear()
+        self.expect = mode
+        pub.publish(Empty())
+        return True, f"[vision] {MODE_LABELS[mode]} 요청: {MODES[mode][0]}"

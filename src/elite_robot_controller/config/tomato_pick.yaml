@@ -27,12 +27,14 @@
     # --- 7 단계: 하강 — TCP +z 방향, 고정 Z 한계 없음 ---------------
     # 벽을 보는 자세에서는 베이스 Z 가 아니라 TCP 가 바라보는 쪽으로 들어간다.
     # 거리 = 토마토 깊이(카메라) + camera_z_offset - gripper_length + grasp_depth
-    #   예) 깊이 300 -> 300 + 33 - 172 + 30 = 191 mm
+    #   예) 깊이 303.4 -> 303.4 + 33 - 172 + 47.5 = 211.9 mm (한양대 실측과 같음)
     descend:
       mode: "vision"               # vision (깊이로 계산) | fixed (fixed_mm 그대로)
       camera_z_offset_mm: 33.0     # 플랜지 면 -> 카메라 앞면 (README.odt: 8 + 25)
       gripper_length_mm: 172.0     # 플랜지 면 -> 핑거 끝 (README.odt: 펼친 끝단)
-      grasp_depth_mm: 30.0         # ★ 핑거 끝이 토마토 앞면을 지나 더 들어갈 양
+      # 핑거 끝이 토마토 앞면을 지나 더 들어갈 양. 한양대 실측 5 회에서 늘
+      # (깊이 − 91.5) mm 내려 집었다 -> 47.5 (깊이 303.4 -> 211.9 mm 하강).
+      grasp_depth_mm: 47.5
       fixed_mm: 100.0              # mode 가 fixed 일 때
       # 안전장치: 계산한 거리가 이보다 길면 하강하지 않고 멈춘다(깊이를
       # 잘못 쟀을 때 벽으로 밀고 들어가지 않게). 고정 Z 한계와는 다르다.
@@ -65,12 +67,13 @@
     # --- 비전 (2, 3, 4 단계) ----------------------------------------
     # doosan_vision_grasp 의 tomato_area_d435i_v2 노드와 맞춘 값이다.
     vision:
-      detection_topic: "/tomato/center_positions"   # PoseArray, m, 카메라 optical
-      detection_type: "geometry_msgs/PoseArray"
-      weight_topic: "/tomato/estimated_weights"     # Float32MultiArray, g
-      height_topic: "/tomato/heights"               # Float32MultiArray, m
-      trigger_topic: "/tomato/capture"              # std_msgs/Empty
-      trigger_type: "empty"
+      # 한양대 통합 비전 노드(tomato_vision_d435i_v2, 2026-10) 의 촬영 종류.
+      #   nearest : /tomato/nearest_capture -> nearest_position / nearest_weight (가장 가까운 1 개)
+      #   middle  : /tomato/middle_capture  -> middle_position / middle_weight  (화면 가운데 칸 1 개)
+      #   pick    : /tomato/pick_capture    -> pick_positions / pick_weights    (전체, 가까운 순)
+      #   weight  : /tomato/capture         -> center_positions / estimated_weights / heights
+      first_capture: "nearest"     # 3 단계 — 대기 자세에서 찾기
+      recapture: "middle"          # 4 단계 뒤 — 카메라 중심 맞춘 다음 재측정 (이 무게가 정확)
       detection_timeout_s: 10.0
       # camera_delta: 카메라 X·Y 를 "지금 위치에서 움직일 양"으로 바로 쓴다.
       # 4 단계는 **TCP 의 x·y 평면**에서 움직인다(align_frame: tool) — 카메라가
@@ -96,7 +99,7 @@
     gripper:
       backend: "int_topic"         # 다이나믹셀 XD540: /set_pos 로 목표 위치
       topic: "/set_pos"
-      close_value: 3185            # 파지
+      close_value: 4095            # 파지 (README.odt 2026-10, 예전 3185)
       open_value: 0                # 열기
       action_wait_s: 1.5           # 동작이 끝날 때까지 기다리는 시간
       # 카메라 중심에 맞춘 뒤 그리퍼 중심까지 더 갈 양 [mm], **TCP 기준**.
@@ -131,5 +134,5 @@
 /tomato_vision_panel:
   ros__parameters:
     ui_port: 8081
-    gripper_close_value: 3185      # [닫기] 버튼 (집기)
+    gripper_close_value: 4095      # [닫기] 버튼 (집기, 예전 3185)
     gripper_open_value: 0          # [열기] 버튼

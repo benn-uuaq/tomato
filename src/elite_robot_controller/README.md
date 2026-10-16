@@ -275,18 +275,20 @@ ros2 launch elite_robot_controller tomato_system.launch.py   # 전체
 
 ## 비전 인터페이스
 
-`doosan_vision_grasp` 의 `tomato_area_d435i_v2` 노드에 맞춰 두었다.
+한양대 통합 비전 노드 `tomato_vision_d435i*.py`(2026-10) 에 맞춰 두었다. 트리거마다
+결과 토픽이 정해져 있다(`vision_interface.MODES`).
 
-| 방향 | 토픽 | 타입 | 단위 |
+| 촬영 | 트리거 | 위치 (PoseArray, m, 카메라 optical) | 무게 (g) |
 | --- | --- | --- | --- |
-| 로봇 → 비전 | `/tomato/capture` | `std_msgs/Empty` | 트리거. 약 1 초간 측정 |
-| 비전 → 로봇 | `/tomato/center_positions` | `geometry_msgs/PoseArray` | **m**, 카메라 optical frame |
-| 비전 → 로봇 | `/tomato/estimated_weights` | `std_msgs/Float32MultiArray` | **g** |
-| 비전 → 로봇 | `/tomato/heights` | `std_msgs/Float32MultiArray` | **m** |
+| `nearest` | `/tomato/nearest_capture` | `/tomato/nearest_position` | `/tomato/nearest_weight` |
+| `middle` | `/tomato/middle_capture` | `/tomato/middle_position` | `/tomato/middle_weight` |
+| `pick` | `/tomato/pick_capture` | `/tomato/pick_positions` | `/tomato/pick_weights` |
+| `weight` | `/tomato/capture` | `/tomato/center_positions` | `/tomato/estimated_weights` (+ `/tomato/heights`) |
 
-세 토픽은 같은 순서로 한 번씩 오고, `VisionClient` 가 인덱스로 합쳐
-`Detection` 하나로 만든다. 위치가 먼저 오고 무게가 조금 늦게 올 수 있어
-0.2 초 기다렸다가 합친다.
+시퀀스는 대기 자세에서 `vision.first_capture`(기본 `nearest`), 카메라 중심을 맞춘
+뒤 `vision.recapture`(기본 `middle`) 를 쓴다. 위치 Z 는 토마토 **앞면** 깊이다.
+`VisionClient` 는 **이번에 요청한 촬영의 결과만** 받고(패널의 시험 촬영 등은 버린다),
+위치가 먼저 오고 무게가 조금 늦게 올 수 있어 0.2 초 기다렸다가 합친다.
 
 좌표 해석 방식은 `vision.detection_frame` 이 정한다.
 
@@ -304,8 +306,11 @@ ros2 launch elite_robot_controller tomato_system.launch.py   # 전체
 ## 그리퍼
 
 다이나믹셀 **XD540-T270** 이고 `/set_pos` (Int32) 로 목표 위치를 받는다.
-README 기준 **3185 파지 / 0 열기**. `gripper_dynamixel_node` 가 이 토픽을
-받아 모터에 쓴다(포트·ID·보드레이트는 파라미터).
+README.odt(2026-10) 기준 **4095 파지 / 0 열기**(예전 3185). `gripper_dynamixel_node`
+가 이 토픽을 받아 모터에 쓰고(포트·ID·보드레이트는 파라미터), 한양대 `dxl_test`
+와 같은 방식으로 **하드웨어 에러(과부하 등)를 복구**한다 — 0.1 초마다 에러 상태를
+읽어 걸려 있으면 재부팅 → 토크 ON → 마지막 목표 재전송, 명령당 3 번까지.
+한양대 `dyn_test` 를 대신 켜 두어도 된다(같은 토픽).
 
 `gripper.backend` 로 다른 방식으로 바꿀 수 있다.
 
