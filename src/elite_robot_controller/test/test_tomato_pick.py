@@ -69,6 +69,8 @@ def test_empty_config_lists_every_missing_value():
     gaps = pick_config.PickConfig().missing()
     for name in ("home_joint", "pick_wait_pose", "place_point_pose"):
         assert name in gaps
+    # 하강 한계도 가르쳐야 시작할 수 있다.
+    assert any(gap.startswith("descend_limit") for gap in gaps)
 
 
 def test_filled_config_has_no_gaps():
@@ -76,6 +78,7 @@ def test_filled_config_has_no_gaps():
         pick_wait_pose=pick_config.pose_to_si([400, 0, 400, 180, 0, 0]),
         place_point_pose=pick_config.pose_to_si([300, -200, 300, 180, 0, 0]),
         home_joint=[0.0, -1.57, 1.57, 0.0, 1.57, 0.0],
+        descend_limit_pose=pick_config.pose_to_si([400, 0, 150, 180, 0, 0]),
         vision=pick_config.VisionConfig(hand_eye_xyz_mm=[0.0, 0.0, 50.0]),
         gripper=pick_config.GripperConfig(backend="topic", topic="/gripper/close"),
     )
@@ -157,7 +160,7 @@ def test_taught_values_override_config_and_ignore_unknown_keys(tmp_path):
                                                          math.radians(5.0))
     assert math.isclose(cfg.place_approach_height, 0.080)
     # 아직 안 가르친 것만 남는다.
-    assert cfg.missing() == ["place_point_pose"]
+    assert cfg.missing() == ["place_point_pose", "descend_limit (하강 한계 — 작업 UI 에서 가르치기)"]
 
 
 def test_missing_teach_file_is_not_an_error(tmp_path):
@@ -515,3 +518,56 @@ def test_vision_panel_ignores_its_own_parents():
 
     mine = VisionPanelNode._ancestors()
     assert os.getpid() in mine and os.getppid() in mine
+
+
+def test_descend_limit_is_taught_as_a_pose(tmp_path):
+    """하강 한계는 숫자가 아니라 가르친 자세 — 그 베이스 Z 가 한계다(250 mm 거리 한도 아님)."""
+    from elite_robot_controller.tomato import teach_store
+
+    path = str(tmp_path / "taught.yaml")
+    teach_store.save(path, {"descend_limit_pose_mm_deg": [450.0, -20.0, 182.5, 180.0, 0.0, 0.0]})
+    cfg = pick_config.PickConfig()
+    assert cfg.descend_limit_z is None
+    assert "descend_limit_pose_mm_deg" in teach_store.apply(cfg, teach_store.load(path))
+    assert math.isclose(cfg.descend_limit_z, 0.1825, abs_tol=1e-9)
+    assert not any(gap.startswith("descend_limit") for gap in cfg.missing())
+    # 거리 한도는 이제 기본으로 꺼져 있다.
+    assert pick_config.DescendConfig().max_travel_mm == 0.0
+    assert dict(pick_config.PARAMETER_DEFAULTS)["descend.max_travel_mm"] == 0.0
+
+
+def test_moves_below_descend_limit_are_refused_before_moving():
+    """4·6·7 단계 목표가 한계 Z 아래면 움직이지 않고 멈춘다. 움직이는 중에도 감시한다."""
+    from elite_robot_controller.tomato import plan
+    from elite_robot_controller.tomato.pick_sequence_node import PickSequenceNode
+
+    assert plan.below_floor([0.4, 0.0, 0.1799, 0, 0, 0], 0.18)
+    assert not plan.below_floor([0.4, 0.0, 0.18, 0, 0, 0], 0.18)        # 딱 한계까지는 된다
+    assert not plan.below_floor([0.4, 0.0, 0.1785, 0, 0, 0], 0.18, 0.002)  # 감시는 2 mm 여유
+    assert not plan.below_floor([0.4, 0.0, -1.0, 0, 0, 0], None)        # 한계 없음
+
+    class Fake:
+        FLOOR_STATES = PickSequenceNode.FLOOR_STATES
+
+        def __init__(self, state="DESCEND", tcp_z=0.30):
+            self.cfg = pick_config.PickConfig(
+                descend_limit_pose=pick_config.pose_to_si([400, 0, 200, 180, 0, 0]))
+            self.state = state
+            self.tcp_pose = [0.4, 0.0, tcp_z, 3.14159, 0.0, 0.0]
+            self.failed = None
+
+        def fail(self, reason):
+            self.failed = reason
+
+    node = Fake()
+    assert PickSequenceNode._floor_ok(node, [0.4, 0.0, 0.25, 0, 0, 0], "7. 하강")
+    assert node.failed is None
+    assert not PickSequenceNode._floor_ok(node, [0.4, 0.0, 0.19, 0, 0, 0], "7. 하강")
+    assert "하강 한계 Z 200.0 mm" in node.failed and "190.0" in node.failed
+
+    # 움직이는 중: 하강 단계에서 실제 TCP 가 한계보다 2 mm 넘게 아래면 세운다.
+    assert PickSequenceNode._watch_floor(Fake(tcp_z=0.199))
+    node = Fake(tcp_z=0.197)
+    assert not PickSequenceNode._watch_floor(node) and "아래로 내려가 멈췄습니다" in node.failed
+    # 하강과 상관없는 단계(홈 이동 등)는 이 감시를 받지 않는다.
+    assert PickSequenceNode._watch_floor(Fake(state="HOME_AFTER_PICK", tcp_z=0.05))

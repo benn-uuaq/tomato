@@ -164,9 +164,9 @@ class DescendConfig:
     #: (토마토 앞면 깊이 − 91.5) mm 내렸다 -> 33 − 172 + g = −91.5 -> g = 47.5.
     grasp_depth_mm: float = 47.5
     fixed_mm: float = 100.0
-    #: 계산한 이동이 이보다 길면 거절한다 — 깊이를 잘못 쟀을 때 벽으로 밀고
-    #: 들어가지 않게 하는 안전장치(고정 하강 한계와는 다르다).
-    max_travel_mm: float = 250.0
+    #: (선택) 계산한 이동이 이보다 길면 거절한다 [mm]. 0 이면 끔(기본).
+    #: 하강 한계는 이 값이 아니라 **가르친 하강 한계 자세의 Z** 다(PickConfig).
+    max_travel_mm: float = 0.0
 
     def travel_mm(self, depth_mm: float) -> float:
         if self.mode == "fixed":
@@ -191,6 +191,9 @@ class PickConfig:
     #: 홈에서 나가는 순서로 적고, 돌아올 때는 거꾸로 거친다.
     waypoints_wait: list = field(default_factory=list)
     waypoints_place: list = field(default_factory=list)
+    #: 하강 한계 — 가르친 자세(SI). 이 자세의 **베이스 Z 보다 아래로는** 4·6·7 단계
+    #: (중심 맞춤·파지점 정렬·하강)가 가지 않는다. 가르치기 전에는 None(시작 거절).
+    descend_limit_pose: list = None
 
     #: 놓기 전 접근 높이 [m] — 놓는 자리 위로 이만큼 (베이스 +Z, 상자 위).
     place_approach_height: float = 0.050
@@ -228,6 +231,11 @@ class PickConfig:
     def place_pose_set(self) -> bool:
         return any(abs(v) > 1e-9 for v in self.place_point_pose)
 
+    @property
+    def descend_limit_z(self):
+        """하강 한계 베이스 Z [m]. 가르치기 전에는 None."""
+        return self.descend_limit_pose[2] if self.descend_limit_pose else None
+
     def missing(self) -> list:
         """아직 못 채운 설정 이름을 돌려준다. UI 가 '시작' 버튼을 막는 근거다."""
         gaps = []
@@ -237,6 +245,8 @@ class PickConfig:
             gaps.append("pick_wait_pose")
         if not self.place_pose_set:
             gaps.append("place_point_pose")
+        if self.descend_limit_pose is None:
+            gaps.append("descend_limit (하강 한계 — 작업 UI 에서 가르치기)")
         if not self.vision.configured:
             gaps.append("vision.first_capture / vision.recapture")
         if self.vision.detection_frame == "camera" and not self.vision.hand_eye_set:
@@ -295,7 +305,7 @@ PARAMETER_DEFAULTS = [
     ("descend.gripper_length_mm", 172.0),
     ("descend.grasp_depth_mm", 47.5),
     ("descend.fixed_mm", 100.0),
-    ("descend.max_travel_mm", 250.0),
+    ("descend.max_travel_mm", 0.0),
 ]
 
 

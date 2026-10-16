@@ -10,7 +10,7 @@
     4  카메라 중심을 토마토에 맞춤 (TCP x·y)  -> 다시 촬영
     5  크기·무게 확인 (중심에서 다시 찍은 값)
     6  그리퍼 파지점 정렬 (TCP 기준 오프셋)
-    7  하강 — TCP +z, 거리는 카메라 깊이로 계산 (고정 Z 한계 없음)
+    7  하강 — TCP +z, 거리는 카메라 깊이로 계산
     8  그리퍼 오므리기
     9  상승 — TCP -z, 6 단계 자세로 = 대기 자세와 같은 선상
     10 홈 자세 (movej)                                              ★ 경유점(거꾸로)
@@ -21,6 +21,10 @@
     15 홈 자세 (movej)                                              ★ 경유점(거꾸로)
     16 대기 자세 (movej) — 연속 운전이면 여기서 3 으로              ★ 경유점
     17 작업 끝 — 홈 자세 (movej)                                     ★ 경유점(거꾸로)
+
+**하강 한계**: 가르친 하강 한계 자세의 베이스 Z 보다 아래로는 4·6·7 단계가 가지
+않는다. 목표가 아래면 움직이기 전에 멈추고, 움직이는 중에도 실제 TCP 가 아래로
+내려가면 세운다. 가르치기 전에는 시작을 거절한다.
 
 각 단계는 **막지 않는다** — 20 Hz 타이머가 상태를 하나씩 진행시키고, 이동
 완료는 실제 TCP(직선 이동) 나 실제 관절값(관절 이동) 이 목표에 들어왔는지로
@@ -132,6 +136,7 @@ class PickSequenceNode(Node):
             "home_pose": self.cb_teach_home,
             "wait_pose": self.cb_teach_wait,
             "place_pose": self.cb_teach_place,
+            "descend_limit": self.cb_teach_descend_limit,
             "waypoint_wait_add": lambda q, r: self._waypoint("waypoints_wait_deg", "add", r),
             "waypoint_wait_undo": lambda q, r: self._waypoint("waypoints_wait_deg", "undo", r),
             "waypoint_wait_clear": lambda q, r: self._waypoint("waypoints_wait_deg", "clear", r),
@@ -355,12 +360,39 @@ class PickSequenceNode(Node):
             self.fail(f"{STEPS.get(self.state, self.state)}: 이동이 제한 시간 안에 끝나지 "
                       "않았습니다 (목표에 닿지 못함 — 경로·회전 표기 확인).")
 
+    # ------------------------------------------------------------ 하강 한계
+    #: 하강 한계를 지키는 단계 — 토마토 쪽으로 직선으로 다가가는 이동들.
+    FLOOR_STATES = ("CENTER", "ALIGN", "DESCEND")
+
+    def _floor_ok(self, pose, label: str) -> bool:
+        """목표가 하강 한계(가르친 자세의 베이스 Z)보다 아래면 움직이지 않고 멈춘다."""
+        floor = self.cfg.descend_limit_z
+        if plan.below_floor(pose, floor):
+            self.fail(f"{label}: 목표 Z {pose[2] * 1000:.1f} mm 가 하강 한계 Z "
+                      f"{floor * 1000:.1f} mm 보다 낮아 움직이지 않습니다 "
+                      "— 토마토 위치·하강 한계를 확인하세요.")
+            return False
+        return True
+
+    def _watch_floor(self) -> bool:
+        """움직이는 중에도 실제 TCP 가 한계 아래로 내려가면 바로 세운다(이중 안전)."""
+        floor = self.cfg.descend_limit_z
+        margin = self.cfg.pose_tolerance_mm / 1000.0
+        if (self.state in self.FLOOR_STATES and self.tcp_pose is not None
+                and plan.below_floor(self.tcp_pose, floor, margin)):
+            self.fail(f"TCP Z {self.tcp_pose[2] * 1000:.1f} mm 가 하강 한계 Z "
+                      f"{floor * 1000:.1f} mm 아래로 내려가 멈췄습니다.")
+            return False
+        return True
+
     # ------------------------------------------------------------ 진행
     def tick(self):
         if self.state in IDLE_STATES + ("PAUSED",):
             return
         if not self.connected:
             self.fail("로봇 연결이 끊겼습니다.")
+            return
+        if not self._watch_floor():
             return
         handler = getattr(self, f"run_{self.state.lower()}", None)
         if handler is None:
@@ -452,6 +484,8 @@ class PickSequenceNode(Node):
                                    and self._align_left > 0):
             self.center_target = plan.center_pose(self.trigger_pose, delta,
                                                   self.cfg.vision.align_frame)
+            if not self._floor_ok(self.center_target, "4. 카메라 중심 맞춤"):
+                return
             self.go("CENTER", "" if self._captures == 1 else "4. 남은 오차만큼 다시 맞춤")
         else:
             self.go("MEASURE")
@@ -480,8 +514,10 @@ class PickSequenceNode(Node):
             f"깊이 {self.depth_mm:.1f} mm (중심 오차 {self.residual_mm:.1f} mm)")
         # 하강 거리를 여기서 정한다(마지막 촬영의 깊이).
         travel = self.cfg.descend.travel_mm(self.depth_mm)
-        if travel > self.cfg.descend.max_travel_mm:
-            self.fail(f"하강 거리 {travel:.0f} mm 가 안전 한도 {self.cfg.descend.max_travel_mm:.0f} mm "
+        # (선택) 거리 한도 — 기본은 끔(0). 하강 한계는 아래의 가르친 Z 로 지킨다.
+        limit = self.cfg.descend.max_travel_mm
+        if limit > 0.0 and travel > limit:
+            self.fail(f"하강 거리 {travel:.0f} mm 가 거리 한도 {limit:.0f} mm "
                       "를 넘습니다 — 카메라 깊이·descend 설정 확인.")
             return
         self.travel_mm = max(0.0, travel)
@@ -489,6 +525,10 @@ class PickSequenceNode(Node):
         self.grip_target = plan.grip_pose(base, self.cfg.gripper.tcp_offset_mm,
                                           self.cfg.gripper.offset_frame)
         self.descend_target = plan.descend_pose(self.grip_target, self.travel_mm / 1000.0)
+        # 움직이기 전에 두 목표 모두 하강 한계 위인지 본다.
+        if not (self._floor_ok(self.grip_target, "6. 파지점 정렬")
+                and self._floor_ok(self.descend_target, "7. 하강")):
+            return
         self.go("ALIGN")
 
     # ---- 6. 파지점 정렬 ----------------------------------------------
@@ -774,6 +814,15 @@ class PickSequenceNode(Node):
         self.taught["place_point_joint_deg"] = self._now_joints_deg()
         return self._save_taught(res, f"놓는 자리 저장: {self.taught['place_point_pose_mm_deg']}")
 
+    def cb_teach_descend_limit(self, req, res):
+        """하강 한계 — 지금 TCP 자세를 저장한다. 그 베이스 Z 보다 아래로는 가지 않는다."""
+        if not self._teach_ready(res, need_joints=False):
+            return res
+        self.taught["descend_limit_pose_mm_deg"] = self._now_pose_deg()
+        z = self.taught["descend_limit_pose_mm_deg"][2]
+        return self._save_taught(res, f"하강 한계 저장: Z {z:.1f} mm "
+                                      "(4·6·7 단계가 이 높이보다 아래로 가지 않습니다)")
+
     def _waypoint(self, key, action, res):
         """★ 경유점 목록을 바꾼다. add 는 지금 관절값을 맨 뒤에 붙인다."""
         label = "홈↔대기" if key == "waypoints_wait_deg" else "홈↔놓는 자리"
@@ -850,6 +899,7 @@ class PickSequenceNode(Node):
                 "waypoints_place": [human_joints(p) for p in self.cfg.waypoints_place],
                 "place_approach_mm": round(self.cfg.place_approach_height * 1000.0, 1),
                 "place_release_gap_mm": round(self.cfg.place_release_gap * 1000.0, 1),
+                "descend_limit_pose": human_pose(self.cfg.descend_limit_pose),
             },
         }
         self.pub_status.publish(String(data=json.dumps(status, ensure_ascii=False)))

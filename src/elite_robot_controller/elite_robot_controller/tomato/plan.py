@@ -65,6 +65,17 @@ def above(pose, height_m: float):
     return out
 
 
+def below_floor(pose, floor_z, margin_m: float = 0.0) -> bool:
+    """자세의 베이스 Z 가 하강 한계(floor_z, m)보다 margin 넘게 아래인지.
+
+    직선 이동(movel)은 시작·끝 사이를 곧게 가므로 Z 도 그 사이에만 있다 —
+    시작점이 한계 위라면 **끝점만 보면** 경로 전체가 한계 위인지 알 수 있다.
+    """
+    if floor_z is None or pose is None:
+        return False
+    return float(pose[2]) < float(floor_z) - float(margin_m)
+
+
 def residual_mm(delta_xy) -> float:
     """카메라 중심에서 토마토까지 [mm]."""
     return 1000.0 * math.hypot(float(delta_xy[0]), float(delta_xy[1]))

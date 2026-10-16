@@ -51,6 +51,7 @@ COMMANDS = {
     "teach_home": "pick/teach/home_pose",
     "teach_wait": "pick/teach/wait_pose",
     "teach_place": "pick/teach/place_pose",
+    "teach_limit": "pick/teach/descend_limit",
     # ★ 경유점 — 홈 <-> 대기 / 홈 <-> 놓는 자리
     "wp_wait_add": "pick/teach/waypoint_wait_add",
     "wp_wait_undo": "pick/teach/waypoint_wait_undo",

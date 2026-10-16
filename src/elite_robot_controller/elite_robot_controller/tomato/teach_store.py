@@ -32,9 +32,12 @@ FIELDS = (
     "waypoints_wait_deg",        # 홈 <-> 대기 자세
     "waypoints_place_deg",       # 홈 <-> 놓는 자리
     "place_approach_mm", "place_release_gap_mm",
+    # 하강 한계 — 이 자세의 베이스 Z 보다 아래로는 가지 않는다(4·6·7 단계).
+    "descend_limit_pose_mm_deg",
 )
 #: 예전 파일에 남아 있을 수 있는 항목. 읽을 때 조용히 버린다.
-#: (max_descend_z_mm: 베이스 Z 하강 한계 — TCP 기준 하강으로 바뀌며 없어졌다)
+#: (max_descend_z_mm: 예전에 숫자로 넣던 하강 한계 — 이제는 자세를 가르친다.
+#:  옛 값이 모르는 사이에 되살아나지 않게 읽지 않는다.)
 
 DEFAULT_PATH = "~/.tomato_pick/taught_poses.yaml"
 
@@ -110,6 +113,10 @@ def apply(cfg, values: dict) -> list:
         setattr(cfg, attr, points)
         if points:
             applied.append(key)
+    pose = values.get("descend_limit_pose_mm_deg")
+    if pose and len(pose) == 6:
+        cfg.descend_limit_pose = pick_config.pose_to_si(pose)
+        applied.append("descend_limit_pose_mm_deg")
     if values.get("place_approach_mm") is not None:
         cfg.place_approach_height = float(values["place_approach_mm"]) * pick_config.MM_TO_M
         applied.append("place_approach_mm")
