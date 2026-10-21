@@ -199,15 +199,16 @@ MOTIONS = [
     ("HOME_START", "1. 홈 자세로", "movej", "joint_speed"),
     ("MOVE_WAIT", "2. 대기 자세로", "movej", "joint_speed"),
     ("CENTER", "4. 카메라 중심 맞춤", "movel", "move_speed"),
-    ("ALIGN", "6. 그리퍼 파지점 정렬", "movel", "move_speed"),
-    ("DESCEND", "7. 하강", "movel", "descend_speed"),
-    ("LIFT", "9. 상승", "movel", "descend_speed"),
-    ("HOME_AFTER_PICK", "10. 홈 자세로", "movej", "joint_speed"),
-    ("PLACE_APPROACH", "11. 놓을 자리 위로", "movej", "joint_speed"),
-    ("PLACE_DESCEND", "12. 감속 하강", "movel", "place_descend_speed"),
-    ("PLACE_RETREAT", "14. 상승", "movel", "descend_speed"),
-    ("HOME_AFTER_PLACE", "15. 홈 자세로", "movej", "joint_speed"),
-    ("HOME_END", "16. 작업 끝 — 홈 자세로", "movej", "joint_speed"),
+    ("ROTATE_WRIST", "6. 6축 회전", "movej", "joint_speed"),
+    ("ALIGN", "7. 그리퍼 파지점 정렬", "movel", "move_speed"),
+    ("DESCEND", "8. 하강", "movel", "descend_speed"),
+    ("LIFT", "10. 상승", "movel", "descend_speed"),
+    ("HOME_AFTER_PICK", "11. 홈 자세로", "movej", "joint_speed"),
+    ("PLACE_APPROACH", "12. 놓을 자리 위로", "movej", "joint_speed"),
+    ("PLACE_DESCEND", "13. 감속 하강", "movel", "place_descend_speed"),
+    ("PLACE_RETREAT", "15. 상승", "movel", "descend_speed"),
+    ("HOME_AFTER_PLACE", "16. 홈 자세로", "movej", "joint_speed"),
+    ("HOME_END", "17. 작업 끝 — 홈 자세로", "movej", "joint_speed"),
     ("WEIGH_HOME", "무게 추정: 다시 촬영 — 홈으로", "movej", "joint_speed"),
 ]
 MOTION_TABLE = {state: (kind, attr) for state, _, kind, attr in MOTIONS}
@@ -269,6 +270,11 @@ class PickConfig:
     move_timeout_s: float = 40.0
     #: 로봇이 보고하는 회전 표기: "rpy" | "rotvec" (geometry 머리말 참고).
     orientation_format: str = "rpy"
+    #: 6 단계 — 카메라 중심을 맞춘 뒤 그리퍼 파지점으로 가기 전에 6 축(손목)을 이만큼
+    #: 돌린다 [deg]. 그리퍼 방향을 토마토에 맞추려고 쓴다. 0 이면 돌리지 않는다.
+    wrist_rotate_deg: float = 0.0
+    #: 6 축이 돌 수 있는 한도 [deg] — 돌린 결과가 넘으면 움직이기 전에 멈춘다.
+    joint6_limit_deg: float = 360.0
     #: 작업 UI 에서 동작마다 정한 속도 {상태: m/s 또는 rad/s} 와 가속도 {"movel"|"movej": …}.
     #: 없는 동작은 위 move_speed / joint_speed / descend_speed … 를 쓴다.
     motion_speeds: dict = field(default_factory=dict)
@@ -343,6 +349,8 @@ PARAMETER_DEFAULTS = [
     ("settle_time_s", 0.3),
     ("move_timeout_s", 40.0),
     ("orientation_format", "rpy"),
+    ("wrist_rotate_deg", 0.0),
+    ("joint6_limit_deg", 360.0),
     ("vision.first_capture", "nearest"),
     ("vision.recapture", "middle"),
     ("vision.weight_capture", "recapture"),
@@ -422,6 +430,8 @@ def load(node) -> PickConfig:
         settle_time_s=float(value("settle_time_s")),
         move_timeout_s=float(value("move_timeout_s")),
         orientation_format=str(value("orientation_format")),
+        wrist_rotate_deg=float(value("wrist_rotate_deg")),
+        joint6_limit_deg=float(value("joint6_limit_deg")),
         vision=VisionConfig(
             first_capture=str(value("vision.first_capture")),
             recapture=str(value("vision.recapture")),

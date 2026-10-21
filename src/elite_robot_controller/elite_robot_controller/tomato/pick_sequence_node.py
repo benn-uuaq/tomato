@@ -9,18 +9,19 @@
     3  촬영 -> 토마토 좌표 수신
     4  카메라 중심을 토마토에 맞춤 (TCP x·y)  -> 다시 촬영
     5  크기·무게 확인 (중심에서 다시 찍은 값)
-    6  그리퍼 파지점 정렬 (TCP 기준 오프셋)
-    7  하강 — TCP +z, 거리는 카메라 깊이로 계산
-    8  그리퍼 오므리기
-    9  상승 — TCP -z, 6 단계 자세로 = 대기 자세와 같은 선상
-    10 홈 자세 (movej)                                              ★ 경유점(거꾸로)
-    11 놓을 자리 위로 (접근 높이는 UI 에서 정함)                      ★ 경유점
-    12 감속 하강
-    13 그리퍼 열기
-    14 상승
-    15 홈 자세 (movej) — 연속 운전이면 여기서 2 로(대기 자세 -> 다음 토마토)
+    6  6 축 회전 (wrist_rotate_deg, 그 자리에서 — 그리퍼 방향 맞춤. 0 이면 건너뜀)
+    7  그리퍼 파지점 정렬 (카메라 중심 자세 기준 오프셋, 방향은 6 단계에서 돌린 그대로)
+    8  하강 — TCP +z, 거리는 카메라 깊이로 계산
+    9  그리퍼 오므리기
+    10 상승 — TCP -z, 7 단계 자세로
+    11 홈 자세 (movej)                                              ★ 경유점(거꾸로)
+    12 놓을 자리 위로 (접근 높이는 UI 에서 정함)                      ★ 경유점
+    13 감속 하강
+    14 그리퍼 열기
+    15 상승
+    16 홈 자세 (movej) — 연속 운전이면 여기서 2 로(대기 자세 -> 다음 토마토)
                                                                     ★ 경유점(거꾸로)
-    16 작업 끝 — 홈 자세 (이미 홈이면 움직이지 않는다.
+    17 작업 끝 — 홈 자세 (이미 홈이면 움직이지 않는다.
        대기 자세에서 토마토가 없어 끝날 때는 경유점을 거꾸로 거쳐 홈으로)
 
 **작업 종류** (UI 에서 고른다)
@@ -31,7 +32,7 @@
                [완료]      -> 7 홈 -> 끝
                [다시 촬영] -> 홈 -> 2 대기 -> 3 ... -> 6 팝업 다시
 
-**하강 한계**: 가르친 하강 한계 자세의 베이스 Z 보다 아래로는 4·6·7 단계가 가지
+**하강 한계**: 가르친 하강 한계 자세의 베이스 Z 보다 아래로는 4·6·7·8 단계가 가지
 않는다. 목표가 아래면 움직이기 전에 멈추고, 움직이는 중에도 실제 TCP 가 아래로
 내려가면 세운다. 가르치기 전에는 시작을 거절한다.
 
@@ -46,6 +47,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -66,17 +68,18 @@ STEP_ORDER = [
     ("WAIT_DETECT", "3. 토마토 좌표 수신 대기"),
     ("CENTER", "4. 카메라 중심을 토마토에 맞춤 (TCP 기준)"),
     ("MEASURE", "5. 크기·무게 확인"),
-    ("ALIGN", "6. 그리퍼 파지점 정렬 (TCP 기준)"),
-    ("DESCEND", "7. 하강 (TCP +z)"),
-    ("GRIP", "8. 그리퍼 오므리기"),
-    ("LIFT", "9. 상승 (TCP -z, 대기 자세 선상)"),
-    ("HOME_AFTER_PICK", "10. 홈 자세로 이동"),
-    ("PLACE_APPROACH", "11. 놓을 자리 위로 이동"),
-    ("PLACE_DESCEND", "12. 감속 하강"),
-    ("RELEASE", "13. 그리퍼 열기"),
-    ("PLACE_RETREAT", "14. 상승"),
-    ("HOME_AFTER_PLACE", "15. 홈 자세로 이동"),
-    ("HOME_END", "16. 작업 끝 — 홈 자세로 이동"),
+    ("ROTATE_WRIST", "6. 6축 회전 (그리퍼 방향 맞춤)"),
+    ("ALIGN", "7. 그리퍼 파지점 정렬"),
+    ("DESCEND", "8. 하강 (TCP +z)"),
+    ("GRIP", "9. 그리퍼 오므리기"),
+    ("LIFT", "10. 상승 (TCP -z)"),
+    ("HOME_AFTER_PICK", "11. 홈 자세로 이동"),
+    ("PLACE_APPROACH", "12. 놓을 자리 위로 이동"),
+    ("PLACE_DESCEND", "13. 감속 하강"),
+    ("RELEASE", "14. 그리퍼 열기"),
+    ("PLACE_RETREAT", "15. 상승"),
+    ("HOME_AFTER_PLACE", "16. 홈 자세로 이동"),
+    ("HOME_END", "17. 작업 끝 — 홈 자세로 이동"),
 ]
 #: [무게 추정] 작업의 순서. 1~4 는 픽앤플레이스와 같다. 무게는 4 단계 끝의 중앙 재측정
 #: 결과를 그대로 쓴다(vision.weight_capture: recapture, 기본).
@@ -489,7 +492,7 @@ class PickSequenceNode(Node):
 
     # ------------------------------------------------------------ 하강 한계
     #: 하강 한계를 지키는 단계 — 토마토 쪽으로 직선으로 다가가는 이동들.
-    FLOOR_STATES = ("CENTER", "ALIGN", "DESCEND")
+    FLOOR_STATES = ("CENTER", "ROTATE_WRIST", "ALIGN", "DESCEND")
 
     def _floor_ok(self, pose, label: str) -> bool:
         """목표가 하강 한계(가르친 자세의 베이스 Z)보다 아래면 움직이지 않고 멈춘다."""
@@ -728,24 +731,65 @@ class PickSequenceNode(Node):
                       "를 넘습니다 — 카메라 깊이·descend 설정 확인.")
             return
         self.travel_mm = max(0.0, travel)
-        base = self.centered_pose or self.trigger_pose
-        self.grip_target = plan.grip_pose(base, self.cfg.gripper.tcp_offset_mm,
-                                          self.cfg.gripper.offset_frame)
-        self.descend_target = plan.descend_pose(self.grip_target, self.travel_mm / 1000.0)
-        # 움직이기 전에 두 목표 모두 하강 한계 위인지 본다.
-        if not (self._floor_ok(self.grip_target, "6. 파지점 정렬")
-                and self._floor_ok(self.descend_target, "7. 하강")):
+        angle = float(self.cfg.wrist_rotate_deg)
+        if abs(angle) < 1e-6:
+            # 6 축을 돌리지 않는다 — 지금 방향 그대로 파지점으로.
+            self.wrist_target = None
+            if self._plan_grip(None):
+                self.go("ALIGN")
             return
-        self.go("ALIGN")
+        if self.joints is None:
+            self.fail("6. 6축 회전: 지금 관절값을 읽지 못했습니다.")
+            return
+        # 절대 관절값으로 한 번만 정한다 — 회전 도중 멈췄다 재개해도 두 번 돌지 않는다.
+        target = list(self.joints)
+        target[5] += math.radians(angle)
+        limit = float(self.cfg.joint6_limit_deg)
+        if abs(math.degrees(target[5])) > limit:
+            self.fail(f"6. 6축 회전: 지금 {math.degrees(self.joints[5]):.1f}° 에서 {angle:+g}° 돌리면 "
+                      f"6축 한도 ±{limit:g}° 를 넘습니다 — 대기 자세의 6축 각도를 확인하세요.")
+            return
+        self.wrist_target = target
+        self.go("ROTATE_WRIST", f"6. 6축 {angle:+g}° 회전 (그리퍼 방향 맞춤)")
 
-    # ---- 6. 파지점 정렬 ----------------------------------------------
+    def _plan_grip(self, orientation) -> bool:
+        """7 파지점·8 하강 목표를 정하고 하강 한계를 본다.
+
+        위치는 **카메라 중심 자세에서** 오프셋(tcp_offset_mm)만큼 — 카메라가 토마토를 보던
+        때의 TCP 와 카메라 사이 거리다. 그리퍼 중심이 6 축 회전축 위에 있으므로 6 축을
+        돌려도 이 위치는 그대로이고, 방향만 6 단계에서 돌린 자세(orientation)를 쓴다.
+        """
+        base = self.centered_pose or self.trigger_pose
+        grip = plan.grip_pose(base, self.cfg.gripper.tcp_offset_mm, self.cfg.gripper.offset_frame)
+        if orientation is not None:
+            grip = list(grip[:3]) + list(orientation)
+        self.grip_target = grip
+        self.descend_target = plan.descend_pose(grip, self.travel_mm / 1000.0)
+        # 움직이기 전에 두 목표 모두 하강 한계 위인지 본다.
+        return (self._floor_ok(self.grip_target, "7. 파지점 정렬")
+                and self._floor_ok(self.descend_target, "8. 하강"))
+
+    # ---- 6. 6축 회전 (그 자리에서) ------------------------------------
+    def enter_rotate_wrist(self):
+        self.move_path("tomato_wrist", [], joints=self.wrist_target)
+
+    def run_rotate_wrist(self):
+        if not self.goal_reached():
+            if self.move_timed_out():
+                self.fail("6. 6축 회전이 제한 시간 안에 끝나지 않았습니다.")
+            return
+        # 돌린 뒤의 실제 TCP 방향으로 파지점·하강 목표를 정한다(한 번만).
+        if self._plan_grip(list(self.tcp_pose[3:6])):
+            self.go("ALIGN")
+
+    # ---- 7. 파지점 정렬 ----------------------------------------------
     def enter_align(self):
         self.move_linear(self.grip_target)
 
     def run_align(self):
         self._await_move("DESCEND")
 
-    # ---- 7. 하강 (TCP +z) --------------------------------------------
+    # ---- 8. 하강 (TCP +z) --------------------------------------------
     def enter_descend(self):
         if self.travel_mm <= 0.0:
             self.get_logger().warn("[descend] 이미 집을 거리 안입니다 — 하강을 건너뜁니다.")
@@ -757,7 +801,7 @@ class PickSequenceNode(Node):
     def run_descend(self):
         self._await_move("GRIP")
 
-    # ---- 8. 그리퍼 오므리기 ------------------------------------------
+    # ---- 9. 그리퍼 오므리기 ------------------------------------------
     def enter_grip(self):
         self._gripper_action(self.gripper.close, closing=True)
 
@@ -765,22 +809,22 @@ class PickSequenceNode(Node):
         if self._wait_until and self.now() >= self._wait_until:
             self.go("LIFT")
 
-    # ---- 9. 상승 (TCP -z) --------------------------------------------
+    # ---- 10. 상승 (TCP -z) --------------------------------------------
     def enter_lift(self):
-        # 6 단계 자세로 되돌아간다 — TCP 축을 따라 들어간 만큼 그대로 빠져나온다.
+        # 7 단계 자세로 되돌아간다 — TCP 축을 따라 들어간 만큼 그대로 빠져나온다.
         self.move_linear(self.grip_target)
 
     def run_lift(self):
         self._await_move("HOME_AFTER_PICK")
 
-    # ---- 10. 홈 ------------------------------------------------------
+    # ---- 11. 홈 -----------------------------------------------------
     def enter_home_after_pick(self):
         self.go_home_via(self.cfg.waypoints_wait)
 
     def run_home_after_pick(self):
         self._await_move("PLACE_APPROACH")
 
-    # ---- 11~14. 놓기 (베이스 Z, 상자 위) ------------------------------
+    # ---- 12~15. 놓기 (베이스 Z, 상자 위) ------------------------------
     def enter_place_approach(self):
         above = plan.above(self.cfg.place_point_pose, self.cfg.place_approach_height)
         self.message = (f"11. 놓을 자리 {self.cfg.place_approach_height * 1000:.0f} mm 위로 이동")
@@ -810,7 +854,7 @@ class PickSequenceNode(Node):
     def run_place_retreat(self):
         self._await_move("HOME_AFTER_PLACE")
 
-    # ---- 15. 홈 ------------------------------------------------------
+    # ---- 16. 홈 -----------------------------------------------------
     def enter_home_after_place(self):
         self.go_home_via(self.cfg.waypoints_place)
 
@@ -830,7 +874,7 @@ class PickSequenceNode(Node):
             self._at_home = True
             self.go("HOME_END")
 
-    # ---- 16. 작업 끝 -------------------------------------------------
+    # ---- 17. 작업 끝 ------------------------------------------------
     def enter_home_end(self):
         if self._at_home:
             # 15 단계에서 이미 홈에 왔다 — 다시 움직이지 않는다.
@@ -872,6 +916,7 @@ class PickSequenceNode(Node):
         self.centered_pose = None
         self.grip_target = None
         self.descend_target = None
+        self.wrist_target = None
         self.travel_mm = None
         self.depth_mm = None
         self.residual_mm = None

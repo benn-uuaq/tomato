@@ -574,13 +574,13 @@ def test_moves_below_descend_limit_are_refused_before_moving():
 
 
 def test_sequence_has_no_return_to_wait_step():
-    """16 단계(대기 자세로 복귀)를 뺐다 — 15 홈 다음이 바로 16 작업 끝이다."""
+    """대기 자세 복귀 단계를 뺐다 — 마지막 홈(16) 다음이 바로 작업 끝(17)이다."""
     from elite_robot_controller.tomato.pick_sequence_node import STEP_ORDER, PickSequenceNode
 
     names = [name for name, _ in STEP_ORDER]
     assert "RETURN_WAIT" not in names
     assert names[-2:] == ["HOME_AFTER_PLACE", "HOME_END"]
-    assert dict(STEP_ORDER)["HOME_END"].startswith("16.")
+    assert dict(STEP_ORDER)["HOME_END"].startswith("17.")
     assert not hasattr(PickSequenceNode, "enter_return_wait")
 
 
@@ -822,3 +822,65 @@ def test_each_motion_has_its_own_speed(tmp_path):
     assert cfg.motion("LIFT")[1] == cfg.descend_speed                  # 정하지 않은 동작은 그대로
     assert cfg.motion("MOVE_WAIT")[0] == cfg.joint_accel
     assert math.isclose(pick_config.motion_to_ui("movej", math.radians(30)), 30.0)
+
+
+def test_wrist_rotates_before_gripper_alignment():
+    """카메라 중심을 맞춘 뒤 6 축을 +90° 돌리고, 파지점 위치는 카메라 중심 자세 기준 오프셋 그대로."""
+    import math
+    from elite_robot_controller.tomato.pick_sequence_node import STEP_ORDER, PickSequenceNode
+
+    names = [n for n, _ in STEP_ORDER]
+    assert names.index("MEASURE") < names.index("ROTATE_WRIST") < names.index("ALIGN")
+
+    class Log:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class Fake:
+        _plan_grip = PickSequenceNode._plan_grip
+        _floor_ok = PickSequenceNode._floor_ok
+
+        def __init__(self, wrist, j6_deg=-145.0):
+            self.cfg = pick_config.PickConfig(
+                wrist_rotate_deg=wrist,
+                gripper=pick_config.GripperConfig(tcp_offset_mm=[-32.5, 100.0, 20.0],
+                                                  offset_frame="base"))
+            self.target = vision_interface.Detection(weight=110.0, height=0.0)
+            self.depth_mm, self.residual_mm = 390.0, 4.8
+            self.centered_pose = [0.75, -0.24, 0.64, math.pi, 0.0, math.radians(47.0)]
+            self.trigger_pose = None
+            self.joints = [0.0, -1.5, -1.0, -1.2, 1.57, math.radians(j6_deg)]
+            self.went, self.failed = None, None
+
+        def get_logger(self):
+            return Log()
+
+        def go(self, state, message=""):
+            self.went = state
+
+        def fail(self, reason):
+            self.failed = reason
+
+    node = Fake(90.0)
+    PickSequenceNode.run_measure(node)
+    assert node.went == "ROTATE_WRIST" and node.failed is None
+    assert math.isclose(math.degrees(node.wrist_target[5]), -55.0)   # -145 + 90
+    assert node.wrist_target[:5] == node.joints[:5]                  # 다른 축은 그대로
+
+    # 돌린 뒤: 위치는 카메라 중심 자세 + 오프셋(베이스), 방향은 돌린 자세 그대로.
+    turned = [math.pi, 0.0, math.radians(137.0)]
+    assert node._plan_grip(turned)
+    g = node.grip_target
+    assert [round(v, 4) for v in g[:3]] == [0.7175, -0.14, 0.66]
+    assert g[3:] == turned
+    assert math.isclose(node.descend_target[2], 0.66 - node.travel_mm / 1000.0, abs_tol=1e-6)
+
+    # 6 축 한도를 넘으면 움직이기 전에 멈춘다.
+    node = Fake(90.0, j6_deg=300.0)
+    PickSequenceNode.run_measure(node)
+    assert node.went is None and "6축 한도" in node.failed
+
+    # 0° 면 돌리지 않고 바로 파지점 정렬로.
+    node = Fake(0.0)
+    PickSequenceNode.run_measure(node)
+    assert node.went == "ALIGN" and node.grip_target[3:] == node.centered_pose[3:]
