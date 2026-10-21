@@ -78,8 +78,20 @@ STEP_ORDER = [
     ("HOME_AFTER_PLACE", "15. 홈 자세로 이동"),
     ("HOME_END", "16. 작업 끝 — 홈 자세로 이동"),
 ]
-#: [무게 추정] 작업의 순서. 1~4 는 픽앤플레이스와 같다.
+#: [무게 추정] 작업의 순서. 1~4 는 픽앤플레이스와 같다. 무게는 4 단계 끝의 중앙 재측정
+#: 결과를 그대로 쓴다(vision.weight_capture: recapture, 기본).
 WEIGHT_STEP_ORDER = [
+    ("HOME_START", "1. 홈 자세로 이동"),
+    ("MOVE_WAIT", "2. 대기 자세로 이동"),
+    ("TRIGGER", "3. 촬영 요청 (최근접 / 중앙 재측정)"),
+    ("WAIT_DETECT", "3. 토마토 좌표 수신 대기"),
+    ("CENTER", "4. 카메라 중심을 토마토에 맞춤 → 중앙 재측정"),
+    ("WEIGHT_RESULT", "5. 무게 확인 — [완료] 또는 [다시 촬영]"),
+    ("WEIGH_HOME", "다시 촬영 — 홈 자세로 이동"),
+    ("HOME_END", "6. 작업 끝 — 홈 자세로 이동"),
+]
+#: vision.weight_capture 가 "weight" 일 때 — 무게 추정 촬영(/tomato/capture)을 한 번 더 한다.
+WEIGHT_STEP_ORDER_CAPTURE = [
     ("HOME_START", "1. 홈 자세로 이동"),
     ("MOVE_WAIT", "2. 대기 자세로 이동"),
     ("TRIGGER", "3. 촬영 요청 (최근접 / 중앙 재측정)"),
@@ -93,7 +105,8 @@ WEIGHT_STEP_ORDER = [
 ]
 JOB_ORDERS = {"pick": STEP_ORDER, "weight": WEIGHT_STEP_ORDER}
 JOB_LABELS = {"pick": "픽앤플레이스", "weight": "무게 추정"}
-STEPS = dict(WEIGHT_STEP_ORDER)
+STEPS = dict(WEIGHT_STEP_ORDER_CAPTURE)
+STEPS.update(dict(WEIGHT_STEP_ORDER))
 STEPS.update(dict(STEP_ORDER))
 STEPS.update({
     "IDLE": "대기 중",
@@ -114,6 +127,11 @@ class PickSequenceNode(Node):
 
         pick_config.declare_all(self)
         self.declare_parameter("teach_file", teach_store.DEFAULT_PATH)
+        # 작업 UI 의 [동작 속도] 가 값을 넘기는 통로(화면 단위, 음수 = 따로 정하지 않음).
+        for state, *_ in pick_config.MOTIONS:
+            pick_config.declare_loose(self, f"speed.{state}", -1.0)
+        for kind in ("movel", "movej"):
+            pick_config.declare_loose(self, f"accel.{kind}", -1.0)
         self.teach_file = self.get_parameter("teach_file").value
         self._load_config()
         # UI 에서 놓기 높이를 바꾸면 여기로 들어온다(SetParameters).
@@ -225,13 +243,17 @@ class PickSequenceNode(Node):
         그리퍼 값은 파라미터 이름 `gripper.close_value` 등으로 들어와
         teach_store 에 `gripper_close_value` 로 저장된다.
         """
-        place, grip = {}, {}
+        place, grip, speeds, accels = {}, {}, {}, {}
         for param in params:
             if param.name in ("place_approach_mm", "place_release_gap_mm"):
                 place[param.name] = float(param.value)
             elif param.name.replace(".", "_") in teach_store.GRIPPER_SETTINGS:
                 grip[param.name.replace(".", "_")] = param.value
-        if not place and not grip:
+            elif param.name.startswith("speed.") and param.name[6:] in pick_config.MOTION_TABLE:
+                speeds[param.name[6:]] = param.value
+            elif param.name in ("accel.movel", "accel.movej"):
+                accels[param.name[6:]] = param.value
+        if not place and not grip and not speeds and not accels:
             return SetParametersResult(successful=True)
         if self.state not in IDLE_STATES:
             return SetParametersResult(successful=False, reason="작업 중에는 바꿀 수 없습니다.")
@@ -263,6 +285,10 @@ class PickSequenceNode(Node):
                     successful=False, reason=f"그리퍼 대기 시간은 0~30 초여야 합니다({value}).")
             self.taught[key] = round(value, 2) if kind is float else value
             notes.append(f"{key} = {self.taught[key]}")
+        if speeds or accels:
+            reason = self._take_motion_settings(speeds, accels, notes)
+            if reason:
+                return SetParametersResult(successful=False, reason=reason)
         try:
             teach_store.save(self.teach_file, self.taught)
         except Exception as exc:
@@ -270,6 +296,37 @@ class PickSequenceNode(Node):
         teach_store.apply(self.cfg, self.taught)
         self.get_logger().info("[settings] " + ", ".join(notes))
         return SetParametersResult(successful=True)
+
+    def _take_motion_settings(self, speeds: dict, accels: dict, notes: list) -> str:
+        """동작별 속도·가속도(화면 단위)를 검사해 self.taught 에 넣는다. 문제가 있으면 사유."""
+        table = dict(self.taught.get("motion_speeds") or {})
+        acc = dict(self.taught.get("motion_accels") or {})
+        for state, raw in speeds.items():
+            kind = pick_config.MOTION_TABLE[state][0]
+            label = dict((m[0], m[1]) for m in pick_config.MOTIONS)[state]
+            value = float(raw)
+            if value < 0:                   # 따로 정한 값을 지운다(기본값으로)
+                table.pop(state, None)
+                continue
+            low, high = pick_config.MOTION_LIMITS[kind][0]
+            if not low <= value <= high:
+                unit = "mm/s" if kind == "movel" else "°/s"
+                return f"{label} 속도는 {low:g}~{high:g} {unit} 여야 합니다({value:g})."
+            table[state] = round(value, 1)
+        for kind, raw in accels.items():
+            value = float(raw)
+            if value < 0:
+                acc.pop(kind, None)
+                continue
+            low, high = pick_config.MOTION_LIMITS[kind][1]
+            if not low <= value <= high:
+                unit = "mm/s²" if kind == "movel" else "°/s²"
+                return f"{kind} 가속도는 {low:g}~{high:g} {unit} 여야 합니다({value:g})."
+            acc[kind] = round(value, 1)
+        self.taught["motion_speeds"] = table
+        self.taught["motion_accels"] = acc
+        notes.append(f"동작 속도 {len(table)}개·가속도 {len(acc)}개 따로 정함")
+        return ""
 
     # ------------------------------------------------------------ 수신
     def now(self) -> float:
@@ -313,9 +370,16 @@ class PickSequenceNode(Node):
             self.get_logger().warn("[stop] robot/dashboard/stop 서비스를 찾지 못했습니다.")
 
     # ------------------------------------------------------- 상태 전이
+    def job_order(self) -> list:
+        """지금 작업 종류의 단계 순서(UI 의 작업 시퀀스 목록)."""
+        if self.job == "weight":
+            return (WEIGHT_STEP_ORDER if self.cfg.vision.weight_capture == "recapture"
+                    else WEIGHT_STEP_ORDER_CAPTURE)
+        return STEP_ORDER
+
     def step_label(self, state: str) -> str:
         """지금 작업 종류의 단계 이름(같은 상태라도 작업마다 번호가 다를 수 있다)."""
-        return dict(JOB_ORDERS.get(self.job, STEP_ORDER)).get(state, STEPS.get(state, state))
+        return dict(self.job_order()).get(state, STEPS.get(state, state))
 
     def go(self, state: str, message: str = ""):
         self.state = state
@@ -352,19 +416,19 @@ class PickSequenceNode(Node):
         self.pub_done.publish(Bool(data=success))
 
     # ------------------------------------------------------- 이동 명령
-    def move_linear(self, pose, speed=None):
-        """직선 이동. 도착은 실제 TCP 로 판정한다."""
-        speed = self.cfg.move_speed if speed is None else speed
-        self.send_script(motion.movel(pose, self.cfg.move_accel, speed))
+    def move_linear(self, pose):
+        """직선 이동. 속도는 지금 단계에 정한 값(작업 UI [동작 속도]). 도착은 실제 TCP 로 판정한다."""
+        accel, speed = self.cfg.motion(self.state)
+        self.send_script(motion.movel(pose, accel, speed))
         self._goal = ("pose", list(pose))
         self._reached_at = None
 
     def move_path(self, name, waypoints, joints=None, pose=None):
         """경유점을 거쳐 관절 이동. 목표가 관절값이면 관절로, 자세면 TCP 로 판정한다."""
+        accel, speed = self.cfg.motion(self.state)
         self.send_script(motion.joint_path_program(
             name, waypoints, target_joints=joints, target_pose=pose,
-            accel=self.cfg.joint_accel, speed=self.cfg.joint_speed,
-            blend=self.cfg.waypoint_blend))
+            accel=accel, speed=speed, blend=self.cfg.waypoint_blend))
         self._goal = ("joints", list(joints)) if joints is not None else ("pose", list(pose))
         self._reached_at = None
         # 경유점이 많으면 그만큼 오래 걸린다.
@@ -576,8 +640,18 @@ class PickSequenceNode(Node):
             self._after_centering()
 
     def _after_centering(self):
-        """중심을 다 맞췄다 — 픽앤플레이스는 5 크기·무게, 무게 추정은 무게 추정 촬영."""
-        self.go("WEIGH_TRIGGER" if self.job == "weight" else "MEASURE")
+        """중심을 다 맞췄다 — 픽앤플레이스는 5 크기·무게, 무게 추정은 무게 확인(팝업).
+
+        무게 추정의 무게는 기본으로 **방금 한 재측정(middle)** 의 값이다 — 카메라 중심에
+        놓인 바로 그 토마토다. vision.weight_capture 가 "weight" 일 때만 무게 추정
+        촬영(/tomato/capture)을 한 번 더 한다(옆 토마토가 잡힌 적이 있어 기본에서 뺐다).
+        """
+        if self.job != "weight":
+            self.go("MEASURE")
+        elif self.cfg.vision.weight_capture == "recapture":
+            self._show_weight(self.target, "")
+        else:
+            self.go("WEIGH_TRIGGER")
 
     # ---- [무게 추정] 5. 무게 추정 촬영 ----------------------------------
     def enter_weigh_trigger(self):
@@ -620,7 +694,7 @@ class PickSequenceNode(Node):
         self.weight_result = result
         text = (f"무게 {detection.weight:.1f} g" if detection is not None else note)
         self.get_logger().info(f"[weight] {text}")
-        self.go("WEIGHT_RESULT", f"6. {text} — [완료] 또는 [다시 촬영]")
+        self.go("WEIGHT_RESULT", f"{text} — [완료] 또는 [다시 촬영]")
 
     def enter_weight_result(self):
         self._goal = None
@@ -678,7 +752,7 @@ class PickSequenceNode(Node):
             self._goal = None
             return
         self.get_logger().info(f"[descend] TCP +z 로 {self.travel_mm:.1f} mm")
-        self.move_linear(self.descend_target, speed=self.cfg.descend_speed)
+        self.move_linear(self.descend_target)
 
     def run_descend(self):
         self._await_move("GRIP")
@@ -694,7 +768,7 @@ class PickSequenceNode(Node):
     # ---- 9. 상승 (TCP -z) --------------------------------------------
     def enter_lift(self):
         # 6 단계 자세로 되돌아간다 — TCP 축을 따라 들어간 만큼 그대로 빠져나온다.
-        self.move_linear(self.grip_target, speed=self.cfg.descend_speed)
+        self.move_linear(self.grip_target)
 
     def run_lift(self):
         self._await_move("HOME_AFTER_PICK")
@@ -718,7 +792,7 @@ class PickSequenceNode(Node):
     def enter_place_descend(self):
         pose = plan.above(self.cfg.place_point_pose, self.cfg.place_release_gap)
         self.message = (f"12. 감속 하강 ({self.cfg.place_release_gap * 1000:.0f} mm 남을 때까지)")
-        self.move_linear(pose, speed=self.cfg.place_descend_speed)
+        self.move_linear(pose)
 
     def run_place_descend(self):
         self._await_move("RELEASE")
@@ -731,8 +805,7 @@ class PickSequenceNode(Node):
             self.go("PLACE_RETREAT")
 
     def enter_place_retreat(self):
-        self.move_linear(plan.above(self.cfg.place_point_pose, self.cfg.place_approach_height),
-                         speed=self.cfg.descend_speed)
+        self.move_linear(plan.above(self.cfg.place_point_pose, self.cfg.place_approach_height))
 
     def run_place_retreat(self):
         self._await_move("HOME_AFTER_PLACE")
@@ -1046,7 +1119,7 @@ class PickSequenceNode(Node):
         status = {
             "state": self.state,
             "step": self.step_label(self.state),
-            "order": JOB_ORDERS.get(self.job, STEP_ORDER),
+            "order": self.job_order(),
             "job": self.job,
             "job_label": JOB_LABELS.get(self.job, self.job),
             "weight_result": self.weight_result,
@@ -1080,6 +1153,12 @@ class PickSequenceNode(Node):
                 "place_approach_mm": round(self.cfg.place_approach_height * 1000.0, 1),
                 "place_release_gap_mm": round(self.cfg.place_release_gap * 1000.0, 1),
                 "descend_limit_pose": human_pose(self.cfg.descend_limit_pose),
+                "motions": self._motion_rows(),
+                "accels": {kind: {"value": round(pick_config.motion_to_ui(
+                                      kind, self.cfg.motion("HOME_START" if kind == "movej"
+                                                            else "CENTER")[0]), 1),
+                                  "set": kind in self.cfg.motion_accels}
+                           for kind in ("movel", "movej")},
                 "gripper": {
                     "close_value": int(self.cfg.gripper.close_value),
                     "open_value": int(self.cfg.gripper.open_value),
@@ -1090,6 +1169,18 @@ class PickSequenceNode(Node):
             },
         }
         self.pub_status.publish(String(data=json.dumps(status, ensure_ascii=False)))
+
+    def _motion_rows(self) -> list:
+        """작업 UI [동작 속도] 표 — 화면 단위."""
+        rows = []
+        for state, label, kind, attr in pick_config.MOTIONS:
+            rows.append({
+                "state": state, "label": label, "kind": kind,
+                "speed": round(pick_config.motion_to_ui(kind, self.cfg.motion(state)[1]), 1),
+                "default": round(pick_config.motion_to_ui(kind, getattr(self.cfg, attr)), 1),
+                "set": state in self.cfg.motion_speeds,
+            })
+        return rows
 
     def destroy_node(self):
         self.gripper.shutdown()

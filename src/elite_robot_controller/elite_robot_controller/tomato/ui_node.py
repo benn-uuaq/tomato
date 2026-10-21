@@ -32,7 +32,7 @@ import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, SetParametersAtomically
 from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
@@ -136,6 +136,10 @@ class PickUiNode(Node):
             "vision": self.create_client(
                 SetParameters, f"/{bridge_node}/set_parameters", callback_group=self._group),
         }
+        # 동작 속도는 여러 값을 한꺼번에 — 같이 검사하고 한 번에 저장되게.
+        self.atomic_client = self.create_client(
+            SetParametersAtomically, "/tomato_pick_sequence/set_parameters_atomically",
+            callback_group=self._group)
         self.link_clients = {
             ("robot", "connect"): self.create_client(
                 Trigger, "robot/dashboard/connect", callback_group=self._group),
@@ -295,6 +299,37 @@ class PickUiNode(Node):
         if not messages:
             return {"success": False, "message": "저장할 값이 없습니다."}
         return {"success": True, "message": "저장: " + ", ".join(messages)}
+
+    def save_speeds(self, body: dict) -> dict:
+        """[동작 속도] — 동작마다 속도(movel mm/s, movej °/s)와 두 가속도. reset 이면 모두 기본값으로."""
+        reset = bool(body.get("reset"))
+        params = []
+        for prefix, values in (("speed.", body.get("speeds") or {}),
+                               ("accel.", body.get("accels") or {})):
+            for key, raw in values.items():
+                if reset:
+                    value = -1.0
+                elif raw in (None, ""):
+                    continue
+                else:
+                    try:
+                        value = float(raw)
+                    except (TypeError, ValueError):
+                        return {"success": False, "message": f"{key}: 숫자를 넣으세요."}
+                params.append(Parameter(prefix + str(key), Parameter.Type.DOUBLE,
+                                        value).to_parameter_msg())
+        if not params:
+            return {"success": False, "message": "저장할 값이 없습니다."}
+        if not self.atomic_client.service_is_ready():
+            return {"success": False, "message": "시퀀스 노드를 찾지 못했습니다."}
+        future = self.atomic_client.call_async(SetParametersAtomically.Request(parameters=params))
+        if not _wait_future(future, 3.0):
+            return {"success": False, "message": "시퀀스 노드 응답이 없습니다."}
+        result = future.result().result
+        if not result.successful:
+            return {"success": False, "message": result.reason or "저장하지 못했습니다."}
+        return {"success": True,
+                "message": "동작 속도를 모두 기본값으로 되돌렸습니다." if reset else "동작 속도를 저장했습니다."}
 
     def _connect_when_ready(self):
         """노드들이 뜰 때까지(서비스가 보일 때까지) 기다렸다가 기억한 주소로 연결한다."""
@@ -468,6 +503,8 @@ class PickUiNode(Node):
                     result = node.disconnect()
                 elif self.path == "/settings":
                     result = node.save_settings(self._json_body())
+                elif self.path == "/speeds":
+                    result = node.save_speeds(self._json_body())
                 elif self.path == "/vision/start":
                     result = node.vision_start(self._json_body())
                 elif self.path == "/vision/stop":

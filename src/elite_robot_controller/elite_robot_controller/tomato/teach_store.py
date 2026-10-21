@@ -37,6 +37,9 @@ FIELDS = (
     # 그리퍼 — 작업 UI 의 [그리퍼] 칸. 위치는 다이나믹셀 값, 시간은 초.
     "gripper_close_value", "gripper_open_value",
     "gripper_close_wait_s", "gripper_open_wait_s",
+    # 동작별 속도 — 작업 UI 의 [동작 속도]. 화면 단위: movel mm/s, movej °/s.
+    "motion_speeds",            # {상태: 속도}
+    "motion_accels",            # {"movel": mm/s², "movej": °/s²}
 )
 
 #: 작업 UI 에서 숫자로 정하는 값 -> (설정 객체 경로, 형). 시퀀스 노드의 SetParameters
@@ -133,6 +136,17 @@ def apply(cfg, values: dict) -> list:
         if values.get(key) is not None:
             setattr(cfg.gripper, attr, kind(values[key]))
             applied.append(key)
+    speeds = values.get("motion_speeds") or {}
+    cfg.motion_speeds = {
+        state: pick_config.motion_from_ui(pick_config.MOTION_TABLE[state][0], float(v))
+        for state, v in speeds.items() if state in pick_config.MOTION_TABLE}
+    if cfg.motion_speeds:
+        applied.append("motion_speeds")
+    accels = values.get("motion_accels") or {}
+    cfg.motion_accels = {kind: pick_config.motion_from_ui(kind, float(v))
+                         for kind, v in accels.items() if kind in ("movel", "movej")}
+    if cfg.motion_accels:
+        applied.append("motion_accels")
     if values.get("place_approach_mm") is not None:
         cfg.place_approach_height = float(values["place_approach_mm"]) * pick_config.MM_TO_M
         applied.append("place_approach_mm")

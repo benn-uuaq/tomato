@@ -56,9 +56,12 @@ class VisionConfig:
     #: 4 단계 뒤 재측정 — 카메라 중심을 맞춘 다음. "middle"(화면 3x3 가운데 칸의
     #: 최근접 1 개, 기본) | "nearest" | ...  여기서 받은 무게가 정확한 값이다.
     recapture: str = "middle"
-    #: [무게 추정] 작업에서 카메라 중심을 맞춘 뒤 무게를 재는 촬영. "weight"(기본 —
-    #: 한양대 노드의 무게 추정 /tomato/capture, 무게·높이) | "middle"(구체 근사 무게).
-    weight_capture: str = "weight"
+    #: [무게 추정] 작업에서 무게를 어디서 받을지.
+    #:   "recapture"(기본) — 카메라 중심을 맞춘 뒤의 재측정(middle) 결과를 그대로 쓴다
+    #:                      (화면 가운데 칸의 그 토마토, 구체 근사 무게). 촬영을 더 하지 않는다.
+    #:   "weight"          — 한양대 무게 추정 촬영(/tomato/capture)을 한 번 더 한다.
+    #:                      2026-10-21 현장: 옆 토마토의 무게가 나와 기본에서 뺐다.
+    weight_capture: str = "recapture"
     #: 촬영 후 결과를 기다리는 한도 [s]. 한양대 노드는 1.5 초 측정한다.
     detection_timeout_s: float = 10.0
     #: 검출 좌표 해석 방식: "camera_delta"(기본) | "camera" | "tool" | "base".
@@ -92,7 +95,7 @@ class VisionConfig:
         """촬영 종류가 모두 아는 것이어야 시퀀스를 돌릴 수 있다."""
         from .vision_interface import MODES
         return (self.first_capture in MODES and self.recapture in MODES
-                and self.weight_capture in MODES)
+                and (self.weight_capture == "recapture" or self.weight_capture in MODES))
 
     @property
     def hand_eye_pose(self) -> list:
@@ -190,6 +193,39 @@ class DescendConfig:
                 - self.gripper_length_mm + self.grasp_depth_mm)
 
 
+#: 동작마다 속도를 따로 정한다(작업 UI 의 [동작 속도]).
+#: 상태 -> (화면 이름, 이동 종류, 따로 안 정했을 때 쓰는 PickConfig 속성)
+MOTIONS = [
+    ("HOME_START", "1. 홈 자세로", "movej", "joint_speed"),
+    ("MOVE_WAIT", "2. 대기 자세로", "movej", "joint_speed"),
+    ("CENTER", "4. 카메라 중심 맞춤", "movel", "move_speed"),
+    ("ALIGN", "6. 그리퍼 파지점 정렬", "movel", "move_speed"),
+    ("DESCEND", "7. 하강", "movel", "descend_speed"),
+    ("LIFT", "9. 상승", "movel", "descend_speed"),
+    ("HOME_AFTER_PICK", "10. 홈 자세로", "movej", "joint_speed"),
+    ("PLACE_APPROACH", "11. 놓을 자리 위로", "movej", "joint_speed"),
+    ("PLACE_DESCEND", "12. 감속 하강", "movel", "place_descend_speed"),
+    ("PLACE_RETREAT", "14. 상승", "movel", "descend_speed"),
+    ("HOME_AFTER_PLACE", "15. 홈 자세로", "movej", "joint_speed"),
+    ("HOME_END", "16. 작업 끝 — 홈 자세로", "movej", "joint_speed"),
+    ("WEIGH_HOME", "무게 추정: 다시 촬영 — 홈으로", "movej", "joint_speed"),
+]
+MOTION_TABLE = {state: (kind, attr) for state, _, kind, attr in MOTIONS}
+#: 화면 단위 — movel 은 mm/s · mm/s², movej 는 °/s · °/s² (스크립트는 m, rad).
+#: 화면에서 받을 수 있는 범위 (속도, 가속도).
+MOTION_LIMITS = {"movel": ((1.0, 1000.0), (10.0, 5000.0)),
+                 "movej": ((1.0, 180.0), (10.0, 1000.0))}
+
+
+def motion_to_ui(kind: str, value_si: float) -> float:
+    """스크립트 단위(m/s, rad/s …)를 화면 단위(mm/s, °/s …)로."""
+    return value_si * 1000.0 if kind == "movel" else math.degrees(value_si)
+
+
+def motion_from_ui(kind: str, value_ui: float) -> float:
+    return value_ui / 1000.0 if kind == "movel" else math.radians(value_ui)
+
+
 @dataclass
 class PickConfig:
     """시퀀스 전체 설정. pose 는 SI(m, rad), 관절값은 rad 로 들고 있는다."""
@@ -233,6 +269,10 @@ class PickConfig:
     move_timeout_s: float = 40.0
     #: 로봇이 보고하는 회전 표기: "rpy" | "rotvec" (geometry 머리말 참고).
     orientation_format: str = "rpy"
+    #: 작업 UI 에서 동작마다 정한 속도 {상태: m/s 또는 rad/s} 와 가속도 {"movel"|"movej": …}.
+    #: 없는 동작은 위 move_speed / joint_speed / descend_speed … 를 쓴다.
+    motion_speeds: dict = field(default_factory=dict)
+    motion_accels: dict = field(default_factory=dict)
 
     vision: VisionConfig = field(default_factory=VisionConfig)
     gripper: GripperConfig = field(default_factory=GripperConfig)
@@ -245,6 +285,13 @@ class PickConfig:
     @property
     def place_pose_set(self) -> bool:
         return any(abs(v) > 1e-9 for v in self.place_point_pose)
+
+    def motion(self, state: str) -> tuple:
+        """그 상태의 이동에 쓸 (가속도, 속도) — 스크립트 단위."""
+        kind, attr = MOTION_TABLE.get(state, ("movel", "move_speed"))
+        speed = self.motion_speeds.get(state, getattr(self, attr))
+        default_accel = self.joint_accel if kind == "movej" else self.move_accel
+        return self.motion_accels.get(kind, default_accel), speed
 
     @property
     def descend_limit_z(self):
@@ -298,7 +345,7 @@ PARAMETER_DEFAULTS = [
     ("orientation_format", "rpy"),
     ("vision.first_capture", "nearest"),
     ("vision.recapture", "middle"),
-    ("vision.weight_capture", "weight"),
+    ("vision.weight_capture", "recapture"),
     ("vision.detection_timeout_s", 10.0),
     ("vision.detection_frame", "camera_delta"),
     ("vision.camera_axis_map", ["-y", "-x"]),

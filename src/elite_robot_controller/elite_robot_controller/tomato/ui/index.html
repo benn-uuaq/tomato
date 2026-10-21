@@ -57,6 +57,13 @@
                 padding:10px; border:1px solid var(--line); border-radius:8px; cursor:pointer;
                 font-weight:600; font-size:15px; }
   .jobs label.on { border-color:var(--ok); color:var(--ok); }
+  .speeds td { vertical-align:middle; }
+  .speeds td:first-child { width:auto; }
+  .speeds input { width:90px; padding:6px 8px; font-size:15px; border-radius:6px;
+                  border:1px solid var(--line); background:var(--bg); color:var(--text);
+                  font-family: ui-monospace, monospace; }
+  .speeds .kind { font-size:12px; color:var(--muted); }
+  .speeds tr.set td:first-child { color:var(--text); font-weight:600; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex;
            align-items:center; justify-content:center; padding:16px; z-index:10; }
   .modal[hidden] { display:none; }
@@ -225,6 +232,27 @@
   </div>
 
   <div class="card">
+    <strong style="font-size:14px">동작 속도</strong>
+    <span style="font-size:13px; color:var(--muted)">
+      — 동작마다 따로 정합니다. movel(직선) 은 mm/s, movej(관절) 은 °/s. 비워 두면 기본값.
+      실제 속도 = 이 값 × 펜던트 속도 슬라이더.</span>
+    <table class="speeds" style="margin-top:8px">
+      <tbody id="speedRows"></tbody>
+      <tr><td>가속도 — movel (직선)</td><td class="kind">mm/s²</td>
+          <td><input id="accel_movel" type="number" min="10" max="5000" step="10"></td>
+          <td class="kind" id="accelDef_movel"></td></tr>
+      <tr><td>가속도 — movej (관절)</td><td class="kind">°/s²</td>
+          <td><input id="accel_movej" type="number" min="10" max="1000" step="1"></td>
+          <td class="kind" id="accelDef_movej"></td></tr>
+    </table>
+    <div class="row" style="margin-top:10px">
+      <button onclick="saveSpeeds(false)">저장</button>
+      <button onclick="if (confirm('동작 속도를 모두 기본값으로 되돌릴까요?')) saveSpeeds(true)">모두 기본값으로</button>
+    </div>
+    <div class="log" id="speedReply" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
     <table>
       <tr><td>현재 TCP [mm, deg]</td><td id="tcp">--</td></tr>
       <tr><td>현재 관절 [deg]</td><td id="joints">--</td></tr>
@@ -278,6 +306,71 @@ async function saveSettings() {
     });
     const j = await r.json();
     reply.textContent = j.message || JSON.stringify(j);
+  } catch (e) { reply.textContent = '요청 실패: ' + e; }
+}
+
+// ---- 동작 속도
+let MOTIONS = [];
+let ACCELS = {};
+let speedsFilled = false;
+
+function buildSpeedRows(c) {
+  MOTIONS = c.motions || [];
+  const body = document.getElementById('speedRows');
+  body.innerHTML = MOTIONS.map(m => {
+    const unit = m.kind === 'movel' ? 'mm/s' : '°/s';
+    const [lo, hi] = m.kind === 'movel' ? [1, 1000] : [1, 180];
+    return `<tr id="sprow-${m.state}"><td>${m.label}</td>
+      <td class="kind">${m.kind} · ${unit}</td>
+      <td><input id="sp-${m.state}" type="number" min="${lo}" max="${hi}" step="${m.kind === 'movel' ? 1 : 0.5}"></td>
+      <td class="kind" id="spdef-${m.state}"></td></tr>`;
+  }).join('');
+}
+
+function renderSpeeds(c) {
+  if (!c.motions) return;
+  if (MOTIONS.length !== c.motions.length) buildSpeedRows(c);
+  MOTIONS = c.motions;
+  ACCELS = c.accels || {};
+  for (const m of c.motions) {
+    document.getElementById('sprow-' + m.state).className = m.set ? 'set' : '';
+    document.getElementById('spdef-' + m.state).textContent =
+      m.set ? `기본 ${m.default} — 따로 정함` : `기본값`;
+  }
+  for (const kind of ['movel', 'movej']) {
+    const a = (c.accels || {})[kind];
+    if (a) document.getElementById('accelDef_' + kind).textContent = a.set ? '따로 정함' : '기본값';
+  }
+  if (!speedsFilled) {
+    for (const m of c.motions) document.getElementById('sp-' + m.state).value = m.speed;
+    for (const kind of ['movel', 'movej']) {
+      const a = (c.accels || {})[kind];
+      if (a) document.getElementById('accel_' + kind).value = a.value;
+    }
+    speedsFilled = true;
+  }
+}
+
+async function saveSpeeds(reset) {
+  const reply = document.getElementById('speedReply');
+  const speeds = {}, accels = {};
+  for (const m of MOTIONS) {
+    const v = document.getElementById('sp-' + m.state).value;
+    // 비우면 기본값으로(따로 정한 값을 지운다). 기본값 그대로면 따로 정하지 않는다.
+    speeds[m.state] = v === '' ? (m.set ? '-1' : '') : ((!m.set && Number(v) === m.default) ? '' : v);
+  }
+  for (const kind of ['movel', 'movej']) {
+    const v = document.getElementById('accel_' + kind).value;
+    const a = ACCELS[kind] || {};
+    accels[kind] = v === '' ? (a.set ? '-1' : '') : ((!a.set && Number(v) === a.value) ? '' : v);
+  }
+  reply.textContent = '저장 중...';
+  try {
+    const r = await fetch('/speeds', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                      body: JSON.stringify({speeds, accels, reset})});
+    const j = await r.json();
+    reply.textContent = j.message || JSON.stringify(j);
+    if (j.success) speedsFilled = false;      // 저장된 값(비운 칸은 기본값)으로 다시 채운다
   } catch (e) { reply.textContent = '요청 실패: ' + e; }
 }
 
@@ -553,6 +646,7 @@ async function poll() {
       : '-- (가르쳐야 시작할 수 있습니다)';
     document.getElementById('wpwait').textContent = wpText(c.waypoints_wait);
     document.getElementById('wpplace').textContent = wpText(c.waypoints_place);
+    renderSpeeds(c);
     const g = c.gripper;
     if (g) {
       document.getElementById('gripMax').textContent = g.max_position;

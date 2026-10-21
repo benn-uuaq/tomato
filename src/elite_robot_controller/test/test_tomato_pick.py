@@ -688,7 +688,10 @@ def test_weight_job_needs_only_home_and_wait():
     names = [n for n, _ in JOB_ORDERS["weight"]]
     assert names[:5] == ["HOME_START", "MOVE_WAIT", "TRIGGER", "WAIT_DETECT", "CENTER"]
     assert "WEIGHT_RESULT" in names and "DESCEND" not in names
-    assert pick_config.VisionConfig().weight_capture == "weight"
+    # 무게는 중심 맞춘 뒤의 재측정 값을 그대로 — 무게 추정 촬영(/tomato/capture)은 기본에서 뺐다.
+    assert "WEIGH_TRIGGER" not in names
+    assert pick_config.VisionConfig().weight_capture == "recapture"
+    assert pick_config.VisionConfig().configured
 
 
 def test_weight_result_uses_tomato_at_image_center():
@@ -736,7 +739,10 @@ def test_weight_result_uses_tomato_at_image_center():
 
 
 def test_vision_client_prepares_weight_capture():
-    """무게 추정 작업의 촬영(/tomato/capture)도 트리거·구독을 만들어 둔다."""
+    """무게 추정 촬영(/tomato/capture)은 weight_capture 가 "weight" 일 때만 준비한다.
+
+    기본(recapture)은 재측정 결과를 그대로 쓰므로 그 토픽을 아예 쓰지 않는다.
+    """
     class Log:
         def __getattr__(self, name):
             return lambda *a, **k: None
@@ -756,7 +762,12 @@ def test_vision_client_prepares_weight_capture():
             return Log()
 
     node = Node()
-    client = vision_interface.VisionClient(node, pick_config.VisionConfig())
+    vision_interface.VisionClient(node, pick_config.VisionConfig())
+    assert "/tomato/capture" not in node.pubs and "/tomato/middle_capture" in node.pubs
+    assert "/tomato/estimated_weights" not in node.subs
+
+    node = Node()
+    client = vision_interface.VisionClient(node, pick_config.VisionConfig(weight_capture="weight"))
     assert "/tomato/capture" in node.pubs and "/tomato/nearest_capture" in node.pubs
     assert {"/tomato/center_positions", "/tomato/estimated_weights", "/tomato/heights"} <= set(node.subs)
     assert "weight" in client._trigger_pubs
@@ -787,3 +798,27 @@ def test_number_parameters_accept_integers_from_yaml():
         node.destroy_node()
     finally:
         rclpy.shutdown()
+
+
+def test_each_motion_has_its_own_speed(tmp_path):
+    """작업 UI 에서 동작마다 정한 속도(mm/s, °/s)가 그 동작에만 쓰이고, 나머지는 기본값."""
+    import math
+    from elite_robot_controller.tomato import teach_store
+
+    cfg = pick_config.PickConfig()
+    # 기본: 직선은 move_speed, 하강·상승은 descend_speed, 관절은 joint_speed
+    assert cfg.motion("CENTER") == (cfg.move_accel, cfg.move_speed)
+    assert cfg.motion("DESCEND")[1] == cfg.descend_speed
+    assert cfg.motion("PLACE_DESCEND")[1] == cfg.place_descend_speed
+    assert cfg.motion("HOME_START") == (cfg.joint_accel, cfg.joint_speed)
+
+    path = str(tmp_path / "taught.yaml")
+    teach_store.save(path, {"motion_speeds": {"DESCEND": 30.0, "HOME_START": 45.0},
+                            "motion_accels": {"movel": 500.0}})
+    teach_store.apply(cfg, teach_store.load(path))
+    assert math.isclose(cfg.motion("DESCEND")[1], 0.030)               # 30 mm/s
+    assert math.isclose(cfg.motion("HOME_START")[1], math.radians(45))  # 45 °/s
+    assert math.isclose(cfg.motion("DESCEND")[0], 0.5)                 # 500 mm/s²
+    assert cfg.motion("LIFT")[1] == cfg.descend_speed                  # 정하지 않은 동작은 그대로
+    assert cfg.motion("MOVE_WAIT")[0] == cfg.joint_accel
+    assert math.isclose(pick_config.motion_to_ui("movej", math.radians(30)), 30.0)

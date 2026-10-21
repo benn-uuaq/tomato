@@ -36,7 +36,7 @@
       gripper_length_mm: 172.0     # 플랜지 면 -> 핑거 끝 (README.odt: 펼친 끝단)
       # 핑거 끝이 토마토 앞면을 지나 더 들어갈 양. 한양대 실측 5 회에서 늘
       # (깊이 − 91.5) mm 내려 집었다 -> 47.5 (깊이 303.4 -> 211.9 mm 하강).
-      grasp_depth_mm: 47.5
+      grasp_depth_mm: 70.0         # 현장 값(2026-10-21). 한양대 실측 기준은 47.5
       fixed_mm: 100.0              # mode 가 fixed 일 때
       # (선택) 계산한 거리가 이보다 길면 하강하지 않고 멈춘다 [mm]. 0 이면 끔.
       # 벽을 보는 자세에서는 하강이 수평이라 베이스 Z 한계가 깊이를 막지 못한다 —
@@ -77,9 +77,10 @@
       #   weight  : /tomato/capture         -> center_positions / estimated_weights / heights
       first_capture: "nearest"     # 3 단계 — 대기 자세에서 찾기
       recapture: "middle"          # 4 단계 뒤 — 카메라 중심 맞춘 다음 재측정 (이 무게가 정확)
-      # [무게 추정] 작업: 중심을 맞춘 뒤 무게를 재는 촬영. weight = 한양대 노드의 무게 추정
-      # (/tomato/capture — 무게·높이), middle = 중앙 재측정의 구체 근사 무게
-      weight_capture: "weight"
+      # [무게 추정] 작업의 무게: recapture = 중심을 맞춘 뒤 재측정(middle)의 그 토마토 무게
+      # (구체 근사, 촬영 추가 없음). weight = 무게 추정 촬영(/tomato/capture)을 한 번 더 —
+      # 옆 토마토 무게가 나온 적이 있어 쓰지 않는다(2026-10-21).
+      weight_capture: "recapture"
       detection_timeout_s: 10.0
       # camera_delta: 카메라 X·Y 를 "지금 위치에서 움직일 양"으로 바로 쓴다.
       # 4 단계는 **TCP 의 x·y 평면**에서 움직인다(align_frame: tool) — 카메라가
@@ -88,7 +89,8 @@
       # (-y, -x)" 는 두산·아래 보기에서 잰 값이라 ★ CS616 에서 반드시 확인한다.
       # 틀리면 두 번째 촬영에서 오차가 줄지 않아 시퀀스가 스스로 멈춘다.
       detection_frame: "camera_delta"
-      camera_axis_map: ["-y", "-x"]
+      # 현장(2026-10-21): 카메라를 돌려 찍으려고 6 축을 약 +90° 돌린 뒤의 값(예전 ["-y", "-x"]).
+      camera_axis_map: ["x", "-y"]
       # 2026-10-21 현장: tool 로는 카메라 축이 TCP 축과 약 41° 틀어져 중심 맞춤이 빗나갔다
       # (아래를 보는 자세에서 측정) — 그래서 base. 벽을 보는 자세로 바꾸면 다시 본다.
       align_frame: "base"          # tool (TCP x·y) | base (아래 보기 전용)
@@ -120,7 +122,8 @@
       # TCP 축으로 다시 확인한다(README.odt: 카메라는 플랜지에서 정면 100.045 mm,
       # 화면 중심은 오른쪽 17.5 mm).
       # offset_frame 이 base 면 Z 는 베이스 +Z(위쪽)다 — 20 이면 20 mm 위에서 하강을 시작한다.
-      tcp_offset_mm: [100.0, 32.5, 20.0]
+      # 6 축을 +90° 돌려 예전 [100.0, 32.5, 20.0] 을 같은 각도로 돌린 값(현장 2026-10-21).
+      tcp_offset_mm: [-32.5, 100.0, 20.0]
       offset_frame: "base"         # tool | base (현장: align_frame 과 같이 base)
 
 /tomato_pick_ui:
@@ -137,7 +140,7 @@
     # 4095 가 한 바퀴. 넘으면 노드가 모터를 확장 위치 모드(4)로 두고 쓴다.
     max_position: 8000
     # 여러 바퀴를 돌 때 너무 빠르지 않게 (x0.229 rpm / x214.577 rev/min^2, 0 = 안 건드림)
-    profile_velocity: 150
+    profile_velocity: 300          # 현장 값(2026-10-21)
     profile_acceleration: 50
 
 /tomato_area_calculator_d435i_v2:
