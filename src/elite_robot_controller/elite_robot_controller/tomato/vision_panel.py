@@ -47,6 +47,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Empty, Float32MultiArray, Int32, String
 
 from . import teach_store
+from .pick_config import declare_loose
 from .process_manager import ManagedProcess, ProcessManager
 
 PACKAGE = "elite_robot_controller"
@@ -83,12 +84,12 @@ class VisionPanelNode(Node):
     def __init__(self):
         super().__init__("tomato_vision_panel")
         self.declare_parameter("ui_host", "0.0.0.0")
-        self.declare_parameter("ui_port", 8081)
-        self.declare_parameter("bridge_port", int(os.environ.get("BRIDGE_PORT", "9000")))
-        self.declare_parameter("gripper_close_value", 4095)
-        self.declare_parameter("gripper_open_value", 0)
+        declare_loose(self, "ui_port", 8081)
+        declare_loose(self, "bridge_port", int(os.environ.get("BRIDGE_PORT", "9000")))
+        declare_loose(self, "gripper_close_value", 4095)
+        declare_loose(self, "gripper_open_value", 0)
         #: 수동 이동([이동] 칸)에서 받는 위치 상한 — 그리퍼 노드의 max_position 과 같게.
-        self.declare_parameter("gripper_max_position", 8000)
+        declare_loose(self, "gripper_max_position", 8000)
         #: 작업 UI 의 [그리퍼] 칸에서 저장한 닫기·열기 위치가 있으면 그것을 쓴다(같은 값).
         self.declare_parameter("teach_file", teach_store.DEFAULT_PATH)
         #: True 면 패널이 뜨자마자 부품을 켠다 — 이미 떠 있는 것은 건너뛴다.

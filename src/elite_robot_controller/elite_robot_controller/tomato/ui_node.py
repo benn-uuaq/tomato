@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import rclpy
@@ -33,10 +34,11 @@ from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rcl_interfaces.srv import SetParameters
 from rclpy.parameter import Parameter
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from . import connection
+from .pick_config import declare_loose
 from .pick_sequence_node import IDLE_STATES, STEPS
 from .vision_remote import VisionRemote, summarize
 
@@ -75,10 +77,10 @@ class PickUiNode(Node):
 
     def __init__(self):
         super().__init__("tomato_pick_ui")
-        self.declare_parameter("ui_port", 8080)
+        declare_loose(self, "ui_port", 8080)
         self.declare_parameter("ui_host", "0.0.0.0")
         #: 서비스 응답을 기다리는 한도 [s]. UI 버튼은 곧바로 답이 와야 한다.
-        self.declare_parameter("service_timeout_s", 5.0)
+        declare_loose(self, "service_timeout_s", 5.0)
 
         # 연결 관련. 처음 화면에 채울 주소는 기억해 둔 파일 > 런치 인자 순이다.
         self.declare_parameter("robot_ip", "192.168.1.200")
@@ -87,14 +89,14 @@ class PickUiNode(Node):
         self.declare_parameter("robot_node", "robot_control_node")
         self.declare_parameter("bridge_node", "vision_bridge_client")
         #: 로봇 연결은 소켓 세 개를 차례로 여느라 실패할 때 몇 초 걸린다.
-        self.declare_parameter("connect_timeout_s", 12.0)
+        declare_loose(self, "connect_timeout_s", 12.0)
         #: True 면 띄우자마자 기억해 둔 주소로 [연결] 을 누른 것처럼 한다
         #: (robot_run.sh --connect). 다른 노드가 뜰 때까지 잠깐 기다렸다가 건다.
         self.declare_parameter("connect_on_start", False)
         # [비전 시작] — 비전 패널(HTTP) 이 없으면 vision_run.sh 를 띄운다(두 대로 나눴으면 SSH, 키 인증).
         self.declare_parameter("orin_user", os.environ.get("ORIN_USER", "nano"))
         self.declare_parameter("orin_workspace", os.environ.get("ORIN_WS", "~/tomato_ws"))
-        self.declare_parameter("vision_panel_port", 8081)
+        declare_loose(self, "vision_panel_port", 8081)
 
         self.connection_file = str(self.get_parameter("connection_file").value)
         remembered = connection.load(self.connection_file)
@@ -114,6 +116,9 @@ class PickUiNode(Node):
         self._vision_busy = threading.Lock()    # 버튼을 연달아 눌러도 한 번만
 
         self.status = {"state": "IDLE", "step": STEPS["IDLE"], "connected": False}
+        self._status_at = None          # 시퀀스 노드의 pick/status 를 마지막으로 받은 시각
+        self.robot_link = None          # 로봇 노드가 알려 주는 연결 여부
+        self._robot_link_at = None
         self._group = ReentrantCallbackGroup()
         self.create_subscription(
             String, "pick/status", self._on_status, 10, callback_group=self._group)
@@ -144,6 +149,10 @@ class PickUiNode(Node):
         self.create_subscription(
             String, "vision/bridge/state", self._on_vision_state, 10,
             callback_group=self._group)
+        # 로봇 연결 표시는 로봇 노드에서 바로 받는다 — 시퀀스 노드가 죽어 있어도 맞게.
+        self.create_subscription(
+            Bool, "robot/status/connected", self._on_robot_link, 10,
+            callback_group=self._group)
 
         try:
             with open(_index_path(), encoding="utf-8") as handle:
@@ -168,8 +177,13 @@ class PickUiNode(Node):
     def _on_status(self, msg):
         try:
             self.status = json.loads(msg.data)
+            self._status_at = time.monotonic()
         except json.JSONDecodeError:
             pass
+
+    def _on_robot_link(self, msg):
+        self.robot_link = bool(msg.data)
+        self._robot_link_at = time.monotonic()
 
     def _on_vision_state(self, msg):
         try:
@@ -397,10 +411,16 @@ class PickUiNode(Node):
     def payload(self) -> bytes:
         data = dict(self.status)
         data["labels"] = STEPS
+        # 시퀀스 노드가 2 초 넘게 상태를 안 보내면 죽었거나 못 뜬 것이다(설정 파일 오류 등).
+        data["sequence_alive"] = (self._status_at is not None
+                                  and time.monotonic() - self._status_at < 2.0)
         data["connection"] = {
             "robot_ip": self.addresses["robot_ip"],
             "vision_host": self.addresses["vision_host"],
             "has_bridge": self.has_bridge,
+            # 로봇 노드가 1 초 안에 알려 온 값만 믿는다(없으면 None — 로봇 노드가 안 떠 있음).
+            "robot_connected": (self.robot_link if self._robot_link_at is not None
+                                and time.monotonic() - self._robot_link_at < 1.0 else None),
             "vision_state": self.vision_state,
             "last": self.last_connect,
         }

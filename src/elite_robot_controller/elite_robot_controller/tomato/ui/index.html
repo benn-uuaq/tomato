@@ -372,6 +372,12 @@ async function disconnectAll() {
   } catch (e) { reply.textContent = '요청 실패: ' + e; }
 }
 
+function robotLinked(s) {
+  const c = s.connection || {};
+  if (c.robot_connected !== null && c.robot_connected !== undefined) return c.robot_connected;
+  return s.sequence_alive ? !!s.connected : null;
+}
+
 function renderConnection(s) {
   const c = s.connection || {};
   // 처음 한 번만 채운다 — 입력하는 중에 덮어쓰지 않게.
@@ -381,8 +387,10 @@ function renderConnection(s) {
     addressesFilled = true;
   }
   const robot = document.getElementById('robotLink');
-  robot.textContent = s.connected ? '연결됨' : '끊김';
-  robot.style.color = s.connected ? 'var(--ok)' : 'var(--accent)';
+  // 로봇 연결은 로봇 노드가 알려 주는 값(시퀀스 노드와 상관없이 맞다).
+  const linked = robotLinked(s);
+  robot.textContent = linked === null ? '-- (로봇 노드 응답 없음)' : (linked ? '연결됨' : '끊김');
+  robot.style.color = linked ? 'var(--ok)' : 'var(--accent)';
 
   // 비전이 같은 장비면(브리지 없음) Orin 칸을 숨긴다.
   document.getElementById('visionField').hidden = !c.has_bridge;
@@ -489,11 +497,19 @@ async function poll() {
     renderWeightModal(s);
     // 작업이 도는 중이면 선택 칸도 그 작업을 보여 준다(다른 화면에서 시작했어도).
     if (!['IDLE', 'DONE', 'ERROR'].includes(s.state) && s.job && s.job !== JOB) selectJob(s.job);
-    document.getElementById('state').textContent = s.step || s.state || '--';
-    document.getElementById('step').textContent = s.message || '';
+    if (s.sequence_alive === false) {
+      // 시퀀스 노드가 죽었거나 못 떴다 — "끊김" 으로 헷갈리지 않게 그대로 알린다.
+      document.getElementById('state').textContent = '시퀀스 노드가 응답하지 않습니다';
+      document.getElementById('step').textContent =
+        'robot_run.sh 터미널의 오류를 확인하세요 (예: 설정 파일 값 형식). 작업 시작·가르치기가 안 됩니다.';
+    } else {
+      document.getElementById('state').textContent = s.step || s.state || '--';
+      document.getElementById('step').textContent = s.message || '';
+    }
     const conn = document.getElementById('conn');
-    conn.textContent = s.connected ? '로봇 연결됨' : '로봇 끊김';
-    conn.className = 'pill ' + (s.connected ? 'on' : 'off');
+    const linked = robotLinked(s);
+    conn.textContent = linked ? '로봇 연결됨' : '로봇 끊김';
+    conn.className = 'pill ' + (linked ? 'on' : 'off');
     // 비전이 다른 장비(Orin)일 때만 보인다. null 이면 같은 장비라 숨긴다.
     const vlink = document.getElementById('vlink');
     if (s.vision_link === null || s.vision_link === undefined) {

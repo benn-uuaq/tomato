@@ -760,3 +760,30 @@ def test_vision_client_prepares_weight_capture():
     assert "/tomato/capture" in node.pubs and "/tomato/nearest_capture" in node.pubs
     assert {"/tomato/center_positions", "/tomato/estimated_weights", "/tomato/heights"} <= set(node.subs)
     assert "weight" in client._trigger_pubs
+
+
+def test_number_parameters_accept_integers_from_yaml():
+    """설정 파일에 `grasp_depth_mm: 60` 처럼 .0 을 빠뜨려도 시퀀스 노드가 죽지 않는다.
+
+    (2026-10-21 현장: 60 으로 적었다가 InvalidParameterTypeException 으로 시퀀스 노드가
+    뜨지 못했고, UI 는 로봇이 '끊김' 으로 보였다.)
+    """
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.parameter import Parameter
+
+    rclpy.init()
+    try:
+        node = Node("loose_params_test", parameter_overrides=[
+            Parameter("descend.grasp_depth_mm", value=60),            # 실수 자리에 정수
+            Parameter("gripper.close_value", value=6000.0),           # 정수 자리에 실수
+            Parameter("gripper.tcp_offset_mm", value=[-32, 100, 10]),  # 실수 목록 자리에 정수 목록
+        ])
+        pick_config.declare_all(node)
+        cfg = pick_config.load(node)
+        assert cfg.descend.grasp_depth_mm == 60.0
+        assert cfg.gripper.close_value == 6000 and isinstance(cfg.gripper.close_value, int)
+        assert cfg.gripper.tcp_offset_mm == [-32.0, 100.0, 10.0]
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()

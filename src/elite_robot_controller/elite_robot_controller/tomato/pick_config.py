@@ -332,10 +332,24 @@ PARAMETER_DEFAULTS = [
 ]
 
 
+def declare_loose(node, name, default):
+    """숫자 파라미터를 `60` 으로 적든 `60.0` 으로 적든 받게 선언한다.
+
+    ROS 2 는 선언한 형(실수)과 설정 파일의 형(정수)이 다르면 노드를 띄우지 못하고
+    죽는다(InvalidParameterTypeException). 설정 파일을 손으로 고치다 `.0` 을 빠뜨리는
+    일이 잦아, 숫자·목록은 형을 따지지 않고 받는다 — 읽는 쪽(load)이 float()/int()
+    로 바꿔 쓴다.
+    """
+    if isinstance(default, (int, float, list, tuple)) and not isinstance(default, bool):
+        from rcl_interfaces.msg import ParameterDescriptor
+        return node.declare_parameter(name, default, ParameterDescriptor(dynamic_typing=True))
+    return node.declare_parameter(name, default)
+
+
 def declare_all(node) -> None:
     """노드에 파라미터를 모두 선언한다."""
     for name, default in PARAMETER_DEFAULTS:
-        node.declare_parameter(name, default)
+        declare_loose(node, name, default)
 
 
 def load(node) -> PickConfig:

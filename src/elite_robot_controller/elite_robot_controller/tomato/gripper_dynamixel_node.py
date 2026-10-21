@@ -41,6 +41,8 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import Int32
 
+from .pick_config import declare_loose
+
 #: XD540-T270 제어 테이블 주소.
 ADDR_OPERATING_MODE = 11     # 1바이트(EEPROM): 3 = 위치(한 바퀴), 4 = 확장 위치(여러 바퀴)
 ADDR_TORQUE_ENABLE = 64      # 1바이트: 1 = On, 0 = Off
@@ -77,17 +79,17 @@ class GripperDynamixelNode(Node):
     def __init__(self):
         super().__init__("gripper_dynamixel")
         self.declare_parameter("device", "/dev/ttyUSB0")
-        self.declare_parameter("baudrate", 57600)
-        self.declare_parameter("dxl_id", 1)
-        self.declare_parameter("protocol", 2.0)
+        declare_loose(self, "baudrate", 57600)
+        declare_loose(self, "dxl_id", 1)
+        declare_loose(self, "protocol", 2.0)
         self.declare_parameter("command_topic", "/set_pos")
         #: 목표 위치 허용 범위. 범위를 벗어난 값은 버린다(잘못된 명령으로
         #: 그리퍼가 끝까지 물리는 것을 막는다). 4095 를 넘으면 확장 위치 모드로 쓴다.
-        self.declare_parameter("min_position", 0)
-        self.declare_parameter("max_position", 8000)
+        declare_loose(self, "min_position", 0)
+        declare_loose(self, "max_position", 8000)
         #: 프로파일 속도(x0.229 rpm)·가속도(x214.577 rev/min^2). 0 이면 건드리지 않는다.
-        self.declare_parameter("profile_velocity", 150)
-        self.declare_parameter("profile_acceleration", 50)
+        declare_loose(self, "profile_velocity", 150)
+        declare_loose(self, "profile_acceleration", 50)
         #: 마지막 위치를 남겨 두는 파일 — 전원을 껐다 켰을 때 바퀴 수를 되찾는 데 쓴다.
         self.declare_parameter("state_file", "~/.tomato_pick/gripper_state.txt")
 
