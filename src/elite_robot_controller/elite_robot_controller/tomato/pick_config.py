@@ -56,6 +56,9 @@ class VisionConfig:
     #: 4 단계 뒤 재측정 — 카메라 중심을 맞춘 다음. "middle"(화면 3x3 가운데 칸의
     #: 최근접 1 개, 기본) | "nearest" | ...  여기서 받은 무게가 정확한 값이다.
     recapture: str = "middle"
+    #: [무게 추정] 작업에서 카메라 중심을 맞춘 뒤 무게를 재는 촬영. "weight"(기본 —
+    #: 한양대 노드의 무게 추정 /tomato/capture, 무게·높이) | "middle"(구체 근사 무게).
+    weight_capture: str = "weight"
     #: 촬영 후 결과를 기다리는 한도 [s]. 한양대 노드는 1.5 초 측정한다.
     detection_timeout_s: float = 10.0
     #: 검출 좌표 해석 방식: "camera_delta"(기본) | "camera" | "tool" | "base".
@@ -86,9 +89,10 @@ class VisionConfig:
 
     @property
     def configured(self) -> bool:
-        """두 촬영 종류가 모두 아는 것이어야 시퀀스를 돌릴 수 있다."""
+        """촬영 종류가 모두 아는 것이어야 시퀀스를 돌릴 수 있다."""
         from .vision_interface import MODES
-        return self.first_capture in MODES and self.recapture in MODES
+        return (self.first_capture in MODES and self.recapture in MODES
+                and self.weight_capture in MODES)
 
     @property
     def hand_eye_pose(self) -> list:
@@ -247,22 +251,26 @@ class PickConfig:
         """하강 한계 베이스 Z [m]. 가르치기 전에는 None."""
         return self.descend_limit_pose[2] if self.descend_limit_pose else None
 
-    def missing(self) -> list:
-        """아직 못 채운 설정 이름을 돌려준다. UI 가 '시작' 버튼을 막는 근거다."""
+    def missing(self, job: str = "pick") -> list:
+        """아직 못 채운 설정 이름을 돌려준다. UI 가 '시작' 버튼을 막는 근거다.
+
+        job 이 "weight"(무게 추정)면 놓는 자리·하강 한계·그리퍼는 필요 없다 —
+        대기 자세에서 찍고 카메라 중심만 맞춘다.
+        """
         gaps = []
         if not self.home_joint:
             gaps.append("home_joint")
         if not self.wait_pose_set:
             gaps.append("pick_wait_pose")
-        if not self.place_pose_set:
+        if job == "pick" and not self.place_pose_set:
             gaps.append("place_point_pose")
-        if self.descend_limit_pose is None:
+        if job == "pick" and self.descend_limit_pose is None:
             gaps.append("descend_limit (하강 한계 — 작업 UI 에서 가르치기)")
         if not self.vision.configured:
-            gaps.append("vision.first_capture / vision.recapture")
+            gaps.append("vision.first_capture / vision.recapture / vision.weight_capture")
         if self.vision.detection_frame == "camera" and not self.vision.hand_eye_set:
             gaps.append("vision.hand_eye_xyz_mm / hand_eye_rpy_deg")
-        if not self.gripper.configured:
+        if job == "pick" and not self.gripper.configured:
             gaps.append("gripper.backend 설정")
         return gaps
 
@@ -290,6 +298,7 @@ PARAMETER_DEFAULTS = [
     ("orientation_format", "rpy"),
     ("vision.first_capture", "nearest"),
     ("vision.recapture", "middle"),
+    ("vision.weight_capture", "weight"),
     ("vision.detection_timeout_s", 10.0),
     ("vision.detection_frame", "camera_delta"),
     ("vision.camera_axis_map", ["-y", "-x"]),
@@ -355,6 +364,7 @@ def load(node) -> PickConfig:
         vision=VisionConfig(
             first_capture=str(value("vision.first_capture")),
             recapture=str(value("vision.recapture")),
+            weight_capture=str(value("vision.weight_capture")),
             detection_timeout_s=float(value("vision.detection_timeout_s")),
             detection_frame=str(value("vision.detection_frame")),
             camera_axis_map=[str(v) for v in value("vision.camera_axis_map")],

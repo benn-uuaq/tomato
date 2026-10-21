@@ -674,3 +674,89 @@ def test_gripper_recovery_restores_lost_turns():
     assert node.packet.goal == 8000 - 4096
     node.cb_set_position(Msg(8001))
     assert node.packet.goal == 8000 - 4096
+
+
+def test_weight_job_needs_only_home_and_wait():
+    """무게 추정은 놓는 자리·하강 한계·그리퍼가 없어도 시작할 수 있다."""
+    from elite_robot_controller.tomato.pick_sequence_node import JOB_ORDERS
+
+    cfg = pick_config.PickConfig(
+        home_joint=[0.0, -1.57, 1.57, 0.0, 1.57, 0.0],
+        pick_wait_pose=pick_config.pose_to_si([400, 0, 400, 180, 0, 0]))
+    assert cfg.missing("weight") == []
+    assert "place_point_pose" in cfg.missing("pick")
+    names = [n for n, _ in JOB_ORDERS["weight"]]
+    assert names[:5] == ["HOME_START", "MOVE_WAIT", "TRIGGER", "WAIT_DETECT", "CENTER"]
+    assert "WEIGHT_RESULT" in names and "DESCEND" not in names
+    assert pick_config.VisionConfig().weight_capture == "weight"
+
+
+def test_weight_result_uses_tomato_at_image_center():
+    """중심을 맞춘 뒤 무게 추정 촬영에서 화면 가운데에 가장 가까운 토마토의 무게를 보여 준다."""
+    from elite_robot_controller.tomato.pick_sequence_node import PickSequenceNode
+
+    class Vision:
+        latest_stamp = 5.0
+        latest = [vision_interface.Detection(x=0.08, y=0.02, z=0.3, weight=150.0),
+                  vision_interface.Detection(x=0.003, y=-0.002, z=0.29, height=58.0, weight=112.0)]
+
+    class Log:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class Fake:
+        _show_weight = PickSequenceNode._show_weight
+
+        def __init__(self):
+            self.vision, self.cfg = Vision(), pick_config.PickConfig()
+            self._trigger_stamp, self._entered_at = 1.0, 1.0
+            self.target = vision_interface.Detection(weight=110.6)    # 중앙 재측정 결과
+            self.went = None
+
+        def now(self):
+            return 2.0
+
+        def get_logger(self):
+            return Log()
+
+        def go(self, state, message=""):
+            self.went = (state, message)
+
+    node = Fake()
+    PickSequenceNode.run_weigh_wait(node)
+    assert node.went[0] == "WEIGHT_RESULT" and "112.0 g" in node.went[1]
+    r = node.weight_result
+    assert r["found"] and r["weight_g"] == 112.0 and r["height_mm"] == 58.0
+    assert r["recapture_weight_g"] == 110.6 and r["count"] == 2
+
+    node = Fake()
+    node.vision.latest = []
+    PickSequenceNode.run_weigh_wait(node)
+    assert node.went[0] == "WEIGHT_RESULT" and not node.weight_result["found"]
+
+
+def test_vision_client_prepares_weight_capture():
+    """무게 추정 작업의 촬영(/tomato/capture)도 트리거·구독을 만들어 둔다."""
+    class Log:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class Node:
+        def __init__(self):
+            self.pubs, self.subs = [], []
+
+        def create_publisher(self, kind, topic, depth):
+            self.pubs.append(topic)
+            return object()
+
+        def create_subscription(self, kind, topic, cb, depth):
+            self.subs.append(topic)
+
+        def get_logger(self):
+            return Log()
+
+    node = Node()
+    client = vision_interface.VisionClient(node, pick_config.VisionConfig())
+    assert "/tomato/capture" in node.pubs and "/tomato/nearest_capture" in node.pubs
+    assert {"/tomato/center_positions", "/tomato/estimated_weights", "/tomato/heights"} <= set(node.subs)
+    assert "weight" in client._trigger_pubs

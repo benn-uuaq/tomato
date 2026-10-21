@@ -77,6 +77,9 @@
       #   weight  : /tomato/capture         -> center_positions / estimated_weights / heights
       first_capture: "nearest"     # 3 단계 — 대기 자세에서 찾기
       recapture: "middle"          # 4 단계 뒤 — 카메라 중심 맞춘 다음 재측정 (이 무게가 정확)
+      # [무게 추정] 작업: 중심을 맞춘 뒤 무게를 재는 촬영. weight = 한양대 노드의 무게 추정
+      # (/tomato/capture — 무게·높이), middle = 중앙 재측정의 구체 근사 무게
+      weight_capture: "weight"
       detection_timeout_s: 10.0
       # camera_delta: 카메라 X·Y 를 "지금 위치에서 움직일 양"으로 바로 쓴다.
       # 4 단계는 **TCP 의 x·y 평면**에서 움직인다(align_frame: tool) — 카메라가

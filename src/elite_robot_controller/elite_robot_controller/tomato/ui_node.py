@@ -44,6 +44,10 @@ from .vision_remote import VisionRemote, summarize
 COMMANDS = {
     "start": "pick/start",
     "start_loop": "pick/start_loop",
+    # 무게 추정 작업과 결과 팝업의 [완료] / [다시 촬영]
+    "start_weight": "pick/start_weight",
+    "weight_done": "pick/weight/done",
+    "weight_retry": "pick/weight/retry",
     "stop": "pick/stop",
     "pause": "pick/pause",
     "resume": "pick/resume",

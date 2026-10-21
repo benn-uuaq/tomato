@@ -14,6 +14,8 @@
             --muted:#9aa2ae; --accent:#e74c3c; --ok:#4caf50; --warn:#e0a030; }
   }
   * { box-sizing: border-box; }
+  /* display 를 준 요소(.field, .pill …)도 hidden 이면 숨긴다 */
+  [hidden] { display: none !important; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--text);
          font-family: system-ui, "Noto Sans KR", sans-serif; }
   h1 { font-size:20px; margin:0 0 12px; }
@@ -50,6 +52,19 @@
          color:var(--muted); max-height:140px; overflow:auto; }
   .steps li { padding:4px 0; color:var(--muted); font-size:14px; }
   .steps li.now { color:var(--text); font-weight:700; }
+  .jobs { display:flex; gap:8px; margin-bottom:10px; }
+  .jobs label { flex:1 1 0; display:flex; align-items:center; justify-content:center; gap:6px;
+                padding:10px; border:1px solid var(--line); border-radius:8px; cursor:pointer;
+                font-weight:600; font-size:15px; }
+  .jobs label.on { border-color:var(--ok); color:var(--ok); }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex;
+           align-items:center; justify-content:center; padding:16px; z-index:10; }
+  .modal[hidden] { display:none; }
+  .modal-box { background:var(--card); border:1px solid var(--line); border-radius:12px;
+               padding:20px; width:100%; max-width:440px; }
+  .modal-title { font-size:15px; color:var(--muted); }
+  .weight-big { font-size:44px; font-weight:800; margin:8px 0 4px; }
+  .modal-detail { font-size:14px; color:var(--muted); line-height:1.7; margin-bottom:14px; }
 </style>
 </head>
 <body>
@@ -108,9 +123,15 @@
   </div>
 
   <div class="card">
+    <div class="jobs" role="radiogroup" aria-label="작업 선택">
+      <label id="jobPickLabel"><input type="radio" name="job" value="pick" checked
+             onchange="selectJob('pick')"> 픽앤플레이스</label>
+      <label id="jobWeightLabel"><input type="radio" name="job" value="weight"
+             onchange="selectJob('weight')"> 무게 추정</label>
+    </div>
     <div class="row">
-      <button class="primary" onclick="cmd('start')">작업 시작</button>
-      <button onclick="cmd('start_loop')">연속 시작</button>
+      <button class="primary" onclick="startJob()">작업 시작</button>
+      <button id="btnLoop" onclick="cmd('start_loop')">연속 시작</button>
       <button onclick="cmd('pause')">일시 정지</button>
       <button onclick="cmd('resume')">재개</button>
       <button class="danger" onclick="cmd('stop')">정지</button>
@@ -218,6 +239,18 @@
   <div class="card">
     <strong style="font-size:14px">작업 시퀀스</strong>
     <ul class="steps" id="steps"></ul>
+  </div>
+
+  <div class="modal" id="weightModal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="wmTitle">
+      <div class="modal-title" id="wmTitle">무게 추정 결과</div>
+      <div class="weight-big" id="wmWeight">--</div>
+      <div class="modal-detail" id="wmDetail"></div>
+      <div class="row">
+        <button class="primary" id="wmDone" onclick="weightButton('weight_done')">완료 (홈으로)</button>
+        <button id="wmRetry" onclick="weightButton('weight_retry')">다시 촬영</button>
+      </div>
+    </div>
   </div>
 
   <div class="card" id="missingcard" hidden>
@@ -363,6 +396,59 @@ function renderConnection(s) {
                      : vs.phase === 'error' ? 'var(--accent)' : 'var(--muted)';
 }
 
+// ---- 작업 선택 (이 브라우저에 기억 — 없으면 픽앤플레이스)
+let JOB = 'pick';
+try { JOB = localStorage.getItem('tomatoJob') || 'pick'; } catch (e) { /* 저장소 없음 */ }
+
+function selectJob(job) {
+  JOB = job;
+  try { localStorage.setItem('tomatoJob', job); } catch (e) { /* 무시 */ }
+  document.querySelectorAll('input[name=job]').forEach(r => r.checked = (r.value === job));
+  document.getElementById('jobPickLabel').className = job === 'pick' ? 'on' : '';
+  document.getElementById('jobWeightLabel').className = job === 'weight' ? 'on' : '';
+  // 연속 운전은 픽앤플레이스에만 있다.
+  document.getElementById('btnLoop').disabled = job !== 'pick';
+}
+
+function startJob() { cmd(JOB === 'weight' ? 'start_weight' : 'start'); }
+
+// ---- 무게 추정 팝업 — 시퀀스가 6 단계(WEIGHT_RESULT)에서 기다리는 동안 띄운다
+let modalShown = false;
+
+function weightButton(name) {
+  document.getElementById('wmDone').disabled = true;
+  document.getElementById('wmRetry').disabled = true;
+  cmd(name);
+}
+
+function renderWeightModal(s) {
+  const modal = document.getElementById('weightModal');
+  const show = s.state === 'WEIGHT_RESULT';
+  if (show && !modalShown) {
+    document.getElementById('wmDone').disabled = false;
+    document.getElementById('wmRetry').disabled = false;
+  }
+  modalShown = show;
+  modal.hidden = !show;
+  if (!show) return;
+  const r = s.weight_result || {};
+  const big = document.getElementById('wmWeight');
+  const detail = document.getElementById('wmDetail');
+  if (r.found) {
+    big.textContent = `${Number(r.weight_g).toFixed(1)} g`;
+    const lines = [];
+    if (r.height_mm) lines.push(`높이 ${r.height_mm} mm`);
+    if (r.diameter_mm) lines.push(`지름 ${r.diameter_mm} mm`);
+    lines.push(`카메라 기준 위치 x ${r.x_mm} · y ${r.y_mm} · 깊이 ${r.z_mm} mm`);
+    if (r.recapture_weight_g !== undefined) lines.push(`참고: 중앙 재측정(구체 근사) ${r.recapture_weight_g} g`);
+    lines.push(`촬영: ${r.capture} · 검출 ${r.count} 개`);
+    detail.innerHTML = lines.join('<br>');
+  } else {
+    big.textContent = '결과 없음';
+    detail.textContent = (r.note || '토마토를 찾지 못했습니다.') + ' 위치를 바꾸고 [다시 촬영] 하거나 [완료] 로 끝내세요.';
+  }
+}
+
 async function cmd(name) {
   const reply = document.getElementById('reply');
   reply.textContent = '요청 중: ' + name;
@@ -375,7 +461,9 @@ async function cmd(name) {
 
 function renderSteps(state) {
   const ul = document.getElementById('steps');
-  if (ul.childElementCount !== ORDER.length) {
+  const key = ORDER.join(',');
+  if (ul.dataset.key !== key) {
+    ul.dataset.key = key;
     ul.innerHTML = '';
     ORDER.forEach(k => {
       const li = document.createElement('li');
@@ -398,6 +486,9 @@ async function poll() {
     if (s.order) { ORDER = s.order.map(o => o[0]); s.order.forEach(o => LABELS[o[0]] = o[1]); }
     renderConnection(s);
     renderVisionPanel(s);
+    renderWeightModal(s);
+    // 작업이 도는 중이면 선택 칸도 그 작업을 보여 준다(다른 화면에서 시작했어도).
+    if (!['IDLE', 'DONE', 'ERROR'].includes(s.state) && s.job && s.job !== JOB) selectJob(s.job);
     document.getElementById('state').textContent = s.step || s.state || '--';
     document.getElementById('step').textContent = s.message || '';
     const conn = document.getElementById('conn');
@@ -412,7 +503,8 @@ async function poll() {
       vlink.textContent = s.vision_link ? '비전 PC 연결됨' : '비전 PC 끊김';
       vlink.className = 'pill ' + (s.vision_link ? 'on' : 'off');
     }
-    document.getElementById('loop').textContent = s.loop ? '연속 운전' : '단일 작업';
+    document.getElementById('loop').textContent =
+      s.job === 'weight' ? '무게 추정' : (s.loop ? '픽앤플레이스 · 연속' : '픽앤플레이스 · 단일');
     document.getElementById('cycles').textContent = '완료 ' + (s.cycles || 0);
     document.getElementById('tcp').textContent = s.tcp_mm_deg ? s.tcp_mm_deg.join(', ') : '--';
     document.getElementById('joints').textContent = s.joints_deg ? s.joints_deg.join(', ') : '--';
@@ -464,12 +556,14 @@ async function poll() {
     }
     renderSteps(s.state);
     const card = document.getElementById('missingcard');
-    if (s.missing && s.missing.length) {
+    const gaps = JOB === 'weight' ? (s.missing_weight || []) : (s.missing || []);
+    if (gaps.length) {
       card.hidden = false;
-      document.getElementById('missing').textContent = '· ' + s.missing.join('\n· ');
+      document.getElementById('missing').textContent = '· ' + gaps.join('\n· ');
     } else { card.hidden = true; }
   } catch (e) { /* 노드가 잠깐 멈춰도 화면은 유지한다 */ }
 }
+selectJob(JOB);
 setInterval(poll, 300);
 poll();
 </script>

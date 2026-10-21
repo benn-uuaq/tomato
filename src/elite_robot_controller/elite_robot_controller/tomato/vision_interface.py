@@ -225,7 +225,9 @@ class VisionClient:
         from std_msgs.msg import Empty, Float32MultiArray
         msg_type = import_message(DEFAULT_TYPE)
         modes = []
-        for mode in (config.first_capture, config.recapture):
+        # 픽앤플레이스(첫 촬영·재측정)와 무게 추정 작업이 쓰는 촬영 종류를 모두 준비한다.
+        for mode in (config.first_capture, config.recapture,
+                     getattr(config, "weight_capture", None)):
             if mode in MODES and mode not in modes:
                 modes.append(mode)
         for mode in modes:

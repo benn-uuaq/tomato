@@ -23,6 +23,14 @@
     16 작업 끝 — 홈 자세 (이미 홈이면 움직이지 않는다.
        대기 자세에서 토마토가 없어 끝날 때는 경유점을 거꾸로 거쳐 홈으로)
 
+**작업 종류** (UI 에서 고른다)
+
+    pick   : 픽앤플레이스 — 위 1~16 단계
+    weight : 무게 추정 — 1 홈 -> 2 대기 -> 3 촬영 -> 4 카메라 중심 맞춤 -> 5 무게 추정
+             촬영 -> 6 무게 확인(UI 팝업, 로봇은 그 자리에서 기다림)
+               [완료]      -> 7 홈 -> 끝
+               [다시 촬영] -> 홈 -> 2 대기 -> 3 ... -> 6 팝업 다시
+
 **하강 한계**: 가르친 하강 한계 자세의 베이스 Z 보다 아래로는 4·6·7 단계가 가지
 않는다. 목표가 아래면 움직이기 전에 멈추고, 움직이는 중에도 실제 TCP 가 아래로
 내려가면 세운다. 가르치기 전에는 시작을 거절한다.
@@ -70,7 +78,23 @@ STEP_ORDER = [
     ("HOME_AFTER_PLACE", "15. 홈 자세로 이동"),
     ("HOME_END", "16. 작업 끝 — 홈 자세로 이동"),
 ]
-STEPS = dict(STEP_ORDER)
+#: [무게 추정] 작업의 순서. 1~4 는 픽앤플레이스와 같다.
+WEIGHT_STEP_ORDER = [
+    ("HOME_START", "1. 홈 자세로 이동"),
+    ("MOVE_WAIT", "2. 대기 자세로 이동"),
+    ("TRIGGER", "3. 촬영 요청 (최근접 / 중앙 재측정)"),
+    ("WAIT_DETECT", "3. 토마토 좌표 수신 대기"),
+    ("CENTER", "4. 카메라 중심을 토마토에 맞춤"),
+    ("WEIGH_TRIGGER", "5. 무게 추정 촬영"),
+    ("WEIGH_WAIT", "5. 무게 추정 결과 대기"),
+    ("WEIGHT_RESULT", "6. 무게 확인 — [완료] 또는 [다시 촬영]"),
+    ("WEIGH_HOME", "다시 촬영 — 홈 자세로 이동"),
+    ("HOME_END", "7. 작업 끝 — 홈 자세로 이동"),
+]
+JOB_ORDERS = {"pick": STEP_ORDER, "weight": WEIGHT_STEP_ORDER}
+JOB_LABELS = {"pick": "픽앤플레이스", "weight": "무게 추정"}
+STEPS = dict(WEIGHT_STEP_ORDER)
+STEPS.update(dict(STEP_ORDER))
 STEPS.update({
     "IDLE": "대기 중",
     "DONE": "작업 완료",
@@ -121,6 +145,10 @@ class PickSequenceNode(Node):
         # ---- 시퀀스 상태 ----------------------------------------------
         self.state = "IDLE"
         self.message = "대기 중"
+        #: 지금(마지막) 작업 종류: "pick" | "weight".
+        self.job = "pick"
+        #: [무게 추정] 마지막 결과(UI 팝업이 보여 준다). 없으면 None.
+        self.weight_result = None
         self.loop_mode = False
         self.cycle_count = 0
         self._entered_at = self.now()
@@ -150,6 +178,10 @@ class PickSequenceNode(Node):
 
         self.create_service(Trigger, "pick/start", self.cb_start)
         self.create_service(Trigger, "pick/start_loop", self.cb_start_loop)
+        # 무게 추정 작업과 그 팝업의 두 버튼.
+        self.create_service(Trigger, "pick/start_weight", self.cb_start_weight)
+        self.create_service(Trigger, "pick/weight/done", self.cb_weight_done)
+        self.create_service(Trigger, "pick/weight/retry", self.cb_weight_retry)
         self.create_service(Trigger, "pick/stop", self.cb_stop)
         self.create_service(Trigger, "pick/pause", self.cb_pause)
         self.create_service(Trigger, "pick/resume", self.cb_resume)
@@ -281,9 +313,13 @@ class PickSequenceNode(Node):
             self.get_logger().warn("[stop] robot/dashboard/stop 서비스를 찾지 못했습니다.")
 
     # ------------------------------------------------------- 상태 전이
+    def step_label(self, state: str) -> str:
+        """지금 작업 종류의 단계 이름(같은 상태라도 작업마다 번호가 다를 수 있다)."""
+        return dict(JOB_ORDERS.get(self.job, STEP_ORDER)).get(state, STEPS.get(state, state))
+
     def go(self, state: str, message: str = ""):
         self.state = state
-        self.message = message or STEPS.get(state, state)
+        self.message = message or self.step_label(state)
         self._entered_at = self.now()
         self._goal = None
         self._reached_at = None
@@ -384,7 +420,7 @@ class PickSequenceNode(Node):
         if self.goal_reached():
             self.go(next_state)
         elif self.move_timed_out():
-            self.fail(f"{STEPS.get(self.state, self.state)}: 이동이 제한 시간 안에 끝나지 "
+            self.fail(f"{self.step_label(self.state)}: 이동이 제한 시간 안에 끝나지 "
                       "않았습니다 (목표에 닿지 못함 — 경로·회전 표기 확인).")
 
     # ------------------------------------------------------------ 하강 한계
@@ -468,6 +504,11 @@ class PickSequenceNode(Node):
             return
         self._captures += 1
         if not self.vision.latest:
+            if self.job == "weight":
+                # 무게 추정은 멈추지 않고 팝업으로 알린다 — [다시 촬영] 으로 이어 갈 수 있게.
+                self._show_weight(None, "대기 자세에서 토마토를 찾지 못했습니다." if self._captures == 1
+                                  else "중심을 맞춘 뒤 재측정에서 토마토를 놓쳤습니다.")
+                return
             if self._captures > 1:
                 # 중심을 맞춘 뒤 다시 찍었는데 없다 — 화면 가운데 칸 밖으로 벗어났거나
                 # 놓쳤다. 엉뚱한 토마토를 집지 않게 멈춘다.
@@ -515,7 +556,7 @@ class PickSequenceNode(Node):
                 return
             self.go("CENTER", "" if self._captures == 1 else "4. 남은 오차만큼 다시 맞춤")
         else:
-            self.go("MEASURE")
+            self._after_centering()
 
     # ---- 4. 카메라 중심 맞추기 ---------------------------------------
     def enter_center(self):
@@ -532,7 +573,72 @@ class PickSequenceNode(Node):
             self._align_left -= 1
             self.go("TRIGGER", "3. 중심에서 다시 촬영")
         else:
-            self.go("MEASURE")
+            self._after_centering()
+
+    def _after_centering(self):
+        """중심을 다 맞췄다 — 픽앤플레이스는 5 크기·무게, 무게 추정은 무게 추정 촬영."""
+        self.go("WEIGH_TRIGGER" if self.job == "weight" else "MEASURE")
+
+    # ---- [무게 추정] 5. 무게 추정 촬영 ----------------------------------
+    def enter_weigh_trigger(self):
+        self.vision.clear()
+        self._trigger_stamp = self.now()
+        mode = self.cfg.vision.weight_capture
+        ok, note = self.vision.trigger(mode)
+        self.get_logger().info(note)
+        if not ok:
+            self.fail(note)
+
+    def run_weigh_trigger(self):
+        self.go("WEIGH_WAIT")
+
+    def run_weigh_wait(self):
+        if self.vision.latest_stamp <= self._trigger_stamp:
+            if (self.now() - self._entered_at) > self.cfg.vision.detection_timeout_s:
+                self._show_weight(None, "무게 추정 결과를 제한 시간 안에 받지 못했습니다.")
+            return
+        if not self.vision.latest:
+            self._show_weight(None, "무게 추정 촬영에서 토마토를 찾지 못했습니다.")
+            return
+        # 카메라 중심을 맞췄으니 화면 가운데에 가장 가까운 것이 그 토마토다.
+        best = min(self.vision.latest, key=lambda d: d.x * d.x + d.y * d.y)
+        self._show_weight(best, "")
+
+    # ---- [무게 추정] 6. 무게 확인 (UI 팝업) -----------------------------
+    def _show_weight(self, detection, note: str):
+        """결과를 남기고 팝업 단계로. 로봇은 그 자리에 선 채로 버튼을 기다린다."""
+        result = {"found": detection is not None, "note": note,
+                  "capture": self.cfg.vision.weight_capture,
+                  "count": len(self.vision.latest),
+                  "at": round(self.now(), 1)}
+        if detection is not None:
+            result.update(detection.as_dict())
+            # 참고: 중심 맞춘 뒤 재측정(구체 근사)에서 받은 무게.
+            if self.target is not None and self.target is not detection:
+                result["recapture_weight_g"] = round(self.target.weight, 1)
+            self.target = detection
+        self.weight_result = result
+        text = (f"무게 {detection.weight:.1f} g" if detection is not None else note)
+        self.get_logger().info(f"[weight] {text}")
+        self.go("WEIGHT_RESULT", f"6. {text} — [완료] 또는 [다시 촬영]")
+
+    def enter_weight_result(self):
+        self._goal = None
+
+    def run_weight_result(self):
+        pass                        # UI 의 [완료] / [다시 촬영] 을 기다린다
+
+    # ---- [무게 추정] 다시 촬영: 홈 -> 2 대기 ---------------------------------
+    def enter_weigh_home(self):
+        self.go_home_via(self.cfg.waypoints_wait)
+
+    def run_weigh_home(self):
+        if not self.goal_reached():
+            if self.move_timed_out():
+                self.fail("다시 촬영 — 홈 복귀가 제한 시간 안에 끝나지 않았습니다.")
+            return
+        self._reset_cycle()
+        self.go("MOVE_WAIT")
 
     # ---- 5. 크기·무게 ------------------------------------------------
     def run_measure(self):
@@ -669,7 +775,10 @@ class PickSequenceNode(Node):
         #   지금은 pick/result(JSON) 와 pick/done(Bool) 만 낸다. 신호가 정해지면
         #   여기에 붙인다(예: Modbus 레지스터, 디지털 출력, MQTT).
         self.go("DONE", self.finish_reason or "작업 완료")
-        self.publish_result(self.cycle_count > 0)
+        if self.job == "weight":
+            self.publish_result(bool(self.weight_result and self.weight_result.get("found")))
+        else:
+            self.publish_result(self.cycle_count > 0)
 
     # ------------------------------------------------------------ 공통
     def _gripper_action(self, action, closing: bool):
@@ -702,31 +811,36 @@ class PickSequenceNode(Node):
         self._at_home = False
 
     # -------------------------------------------------------- 명령 처리
-    def _can_start(self) -> tuple:
+    def _can_start(self, job: str = "pick") -> tuple:
         if not self.connected:
             return False, "로봇에 연결되어 있지 않습니다."
         if self.state not in IDLE_STATES:
             return False, f"이미 작업 중입니다({self.state})."
-        gaps = self.cfg.missing()
+        gaps = self.cfg.missing(job)
         if gaps:
             return False, "아직 정하지 않은 값이 있습니다: " + ", ".join(gaps)
         if self.vision_link is False:
             return False, "비전 PC(Orin) 에 연결되어 있지 않습니다."
         return True, ""
 
-    def _start(self, loop: bool, res):
-        ok, why = self._can_start()
+    def _start(self, loop: bool, res, job: str = "pick"):
+        ok, why = self._can_start(job)
         if not ok:
             res.success = False
-            res.message = f"[pick] 시작할 수 없습니다 — {why}"
+            res.message = f"[pick] {JOB_LABELS[job]} 시작할 수 없습니다 — {why}"
             self.get_logger().warn(res.message)
             return res
-        self.loop_mode = loop
+        self.job = job
+        self.weight_result = None
+        self.loop_mode = loop and job == "pick"
         self.cycle_count = 0
         self._reset_cycle()
         self.go("HOME_START")
         res.success = True
-        res.message = "[pick] 연속 작업을 시작합니다." if loop else "[pick] 작업을 시작합니다."
+        if job == "weight":
+            res.message = "[pick] 무게 추정을 시작합니다."
+        else:
+            res.message = "[pick] 연속 작업을 시작합니다." if loop else "[pick] 작업을 시작합니다."
         return res
 
     def cb_start(self, req, res):
@@ -734,6 +848,35 @@ class PickSequenceNode(Node):
 
     def cb_start_loop(self, req, res):
         return self._start(True, res)
+
+    def cb_start_weight(self, req, res):
+        return self._start(False, res, job="weight")
+
+    def cb_weight_done(self, req, res):
+        """팝업 [완료] — 홈으로 가서 끝낸다."""
+        if self.state != "WEIGHT_RESULT":
+            res.success = False
+            res.message = "[weight] 무게 확인 단계가 아닙니다."
+            return res
+        found = self.weight_result and self.weight_result.get("found")
+        self.finish_reason = (f"무게 추정 완료 — {self.weight_result['weight_g']} g" if found
+                              else "무게 추정 — 결과 없이 마쳤습니다")
+        self.go("HOME_END")
+        res.success = True
+        res.message = "[weight] 완료 — 홈으로 이동합니다."
+        return res
+
+    def cb_weight_retry(self, req, res):
+        """팝업 [다시 촬영] — 홈 -> 대기 자세 -> 촬영 -> 중심 맞춤 -> 무게 추정."""
+        if self.state != "WEIGHT_RESULT":
+            res.success = False
+            res.message = "[weight] 무게 확인 단계가 아닙니다."
+            return res
+        self.weight_result = None
+        self.go("WEIGH_HOME")
+        res.success = True
+        res.message = "[weight] 다시 촬영 — 홈을 거쳐 대기 자세로 갑니다."
+        return res
 
     def cb_trigger_topic(self, msg):
         """`pick/trigger` (Empty) 한 번이면 한 사이클을 돈다."""
@@ -748,6 +891,9 @@ class PickSequenceNode(Node):
         handlers = {
             "start": lambda: self._start(False, res), "single": lambda: self._start(False, res),
             "loop": lambda: self._start(True, res), "start_loop": lambda: self._start(True, res),
+            "weight": lambda: self._start(False, res, job="weight"),
+            "weight_done": lambda: self.cb_weight_done(None, res),
+            "weight_retry": lambda: self.cb_weight_retry(None, res),
             "stop": lambda: self.cb_stop(None, res), "pause": lambda: self.cb_pause(None, res),
             "resume": lambda: self.cb_resume(None, res),
         }
@@ -773,7 +919,7 @@ class PickSequenceNode(Node):
         self._paused_state = self.state
         self.robot_stop()
         self.state = "PAUSED"
-        self.message = f"일시 정지 — {STEPS.get(self._paused_state, self._paused_state)}"
+        self.message = f"일시 정지 — {self.step_label(self._paused_state)}"
         res.success = True
         res.message = "[pick] 일시 정지했습니다."
         return res
@@ -785,7 +931,7 @@ class PickSequenceNode(Node):
             return res
         # 멈춘 단계를 처음부터 다시 실행한다. 목표가 모두 절대 자세라 하강
         # 도중 멈췄다 재개해도 두 배로 들어가지 않는다(plan.py 머리말).
-        self.go(self._paused_state, f"재개 — {STEPS.get(self._paused_state, '')}")
+        self.go(self._paused_state, f"재개 — {self.step_label(self._paused_state)}")
         res.success = True
         res.message = "[pick] 작업을 재개했습니다."
         return res
@@ -899,8 +1045,12 @@ class PickSequenceNode(Node):
 
         status = {
             "state": self.state,
-            "step": STEPS.get(self.state, self.state),
-            "order": STEP_ORDER,
+            "step": self.step_label(self.state),
+            "order": JOB_ORDERS.get(self.job, STEP_ORDER),
+            "job": self.job,
+            "job_label": JOB_LABELS.get(self.job, self.job),
+            "weight_result": self.weight_result,
+            "missing_weight": self.cfg.missing("weight"),
             "message": self.message,
             "connected": self.connected,
             "loop": self.loop_mode,

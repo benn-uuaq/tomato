@@ -14,6 +14,8 @@
             --muted:#9aa2ae; --accent:#e74c3c; --ok:#4caf50; --warn:#e0a030; --busy:#62a0ea; }
   }
   * { box-sizing: border-box; }
+  /* display 를 준 요소(.field, .pill …)도 hidden 이면 숨긴다 */
+  [hidden] { display: none !important; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--text);
          font-family: system-ui, "Noto Sans KR", sans-serif; }
   .wrap { max-width: 980px; margin: 0 auto; }
