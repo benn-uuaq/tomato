@@ -571,3 +571,106 @@ def test_moves_below_descend_limit_are_refused_before_moving():
     assert not PickSequenceNode._watch_floor(node) and "아래로 내려가 멈췄습니다" in node.failed
     # 하강과 상관없는 단계(홈 이동 등)는 이 감시를 받지 않는다.
     assert PickSequenceNode._watch_floor(Fake(state="HOME_AFTER_PICK", tcp_z=0.05))
+
+
+def test_sequence_has_no_return_to_wait_step():
+    """16 단계(대기 자세로 복귀)를 뺐다 — 15 홈 다음이 바로 16 작업 끝이다."""
+    from elite_robot_controller.tomato.pick_sequence_node import STEP_ORDER, PickSequenceNode
+
+    names = [name for name, _ in STEP_ORDER]
+    assert "RETURN_WAIT" not in names
+    assert names[-2:] == ["HOME_AFTER_PLACE", "HOME_END"]
+    assert dict(STEP_ORDER)["HOME_END"].startswith("16.")
+    assert not hasattr(PickSequenceNode, "enter_return_wait")
+
+
+def test_gripper_values_and_waits_come_from_the_ui(tmp_path):
+    """작업 UI 에서 저장한 닫기·열기 위치와 대기 시간이 설정 위에 덮어써진다."""
+    from elite_robot_controller.tomato import teach_store
+
+    path = str(tmp_path / "taught.yaml")
+    teach_store.save(path, {"gripper_close_value": 6500, "gripper_open_value": 100,
+                            "gripper_close_wait_s": 2.5, "gripper_open_wait_s": 0.8})
+    cfg = pick_config.PickConfig()
+    applied = teach_store.apply(cfg, teach_store.load(path))
+    assert {"gripper_close_value", "gripper_open_wait_s"} <= set(applied)
+    g = cfg.gripper
+    assert (g.close_value, g.open_value) == (6500, 100)
+    assert g.wait_s(closing=True) == 2.5 and g.wait_s(closing=False) == 0.8
+    # 따로 정하지 않았으면(음수) 예전 action_wait_s 를 쓴다.
+    assert pick_config.GripperConfig(action_wait_s=1.2).wait_s(True) == 1.2
+    assert pick_config.GripperConfig().max_position == 8000
+
+
+def test_gripper_recovery_restores_lost_turns():
+    """재부팅하면 모터는 몇 바퀴째였는지 잊는다 — 보정 없이 6000 을 다시 보내면 한 바퀴 더 조인다."""
+    from elite_robot_controller.tomato import gripper_dynamixel_node as g
+
+    assert g.turns_lost(6000, 6000 - 4096) == 1 and g.turns_lost(300, 300) == 0
+    assert g.same_but_turns(6000, 1904) and not g.same_but_turns(6000, 900)
+
+    class Motor:
+        """확장 위치 모드 흉내: 재부팅하면 위치를 한 바퀴 안(0~4095)으로 다시 센다."""
+        def __init__(self, position):
+            self.position, self.goal, self.error, self.writes = position, position, 0, []
+
+        def reboot(self, port, dxl_id):
+            self.position %= 4096
+            self.error = 0
+            return 0, 0
+
+        def read1ByteTxRx(self, port, dxl_id, addr):
+            return (self.error if addr == g.ADDR_HARDWARE_ERROR_STATUS else 4), 0, 0
+
+        def read4ByteTxRx(self, port, dxl_id, addr):
+            return self.position & 0xFFFFFFFF, 0, 0
+
+        def write1ByteTxRx(self, port, dxl_id, addr, value):
+            return 0, 0
+
+        def write4ByteTxRx(self, port, dxl_id, addr, value):
+            self.writes.append((addr, value))
+            if addr == g.ADDR_GOAL_POSITION:
+                self.goal = value - (1 << 32) if value > 0x7FFFFFFF else value
+            return 0, 0
+
+        def getTxRxResult(self, result):
+            return "ok"
+
+    class Log:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class Param:
+        def __init__(self, value):
+            self.value = value
+
+    node = object.__new__(g.GripperDynamixelNode)
+    params = {"profile_velocity": 150, "profile_acceleration": 50,
+              "min_position": 0, "max_position": 8000}
+    node.get_parameter = lambda name: Param(params[name])
+    node.get_logger = lambda: Log()
+    node.packet, node.port, node.dxl_id = Motor(6000), object(), 1
+    node.turn_offset, node.last_present, node.last_goal, node.recovery_count = 0, 6000, 6000, 0
+
+    import time as _time
+    sleep, _time.sleep = _time.sleep, (lambda s: None)
+    try:
+        node._recover()
+    finally:
+        _time.sleep = sleep
+    # 모터는 1904 로 다시 세지만, 보정해서 같은 물리 위치(모터 값 1904)를 목표로 보낸다.
+    assert node.turn_offset == 4096
+    assert node.packet.goal == 6000 - 4096
+    # 재부팅 뒤 지워지는 프로파일 속도·가속도도 다시 썼다.
+    addrs = [a for a, _ in node.packet.writes]
+    assert g.ADDR_PROFILE_VELOCITY in addrs and g.ADDR_PROFILE_ACCELERATION in addrs
+
+    # 새 명령도 보정된 값으로 간다(8000 -> 모터 값 3904), 범위 밖(8001)은 버린다.
+    class Msg:
+        def __init__(self, data):
+            self.data = data
+    node.cb_set_position(Msg(8000))
+    assert node.packet.goal == 8000 - 4096
+    node.cb_set_position(Msg(8001))
+    assert node.packet.goal == 8000 - 4096

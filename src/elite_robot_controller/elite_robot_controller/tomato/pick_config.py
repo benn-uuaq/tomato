@@ -114,23 +114,34 @@ class GripperConfig:
     backend: str = "int_topic"
     #: 그리퍼 명령 토픽. int_topic 이면 Int32, topic 이면 Bool.
     topic: str = "/set_pos"
-    #: int_topic 일 때의 목표 위치 값(0~4095). README.odt(2026-10) 기준 4095 가 파지,
-    #: 0 이 열림(예전 3185).
+    #: int_topic 일 때의 목표 위치 값(0~max_position). 0 이 열림, 클수록 닫힘.
+    #: 모터는 확장 위치 모드(여러 바퀴)라 4095(한 바퀴)를 넘을 수 있다.
+    #: 작업 UI 의 [그리퍼] 칸에서 바꾸면 그 값이 우선한다(teach_store).
     close_value: int = 4095
     open_value: int = 0
+    #: 위치 명령의 상한. 그리퍼 노드(gripper_dynamixel.max_position)와 같게 둔다.
+    max_position: int = 8000
     #: backend 가 serial 일 때(Orin nano 직결). 포트와 보드레이트, 명령 문자열.
     serial_port: str = ""
     serial_baud: int = 115200
     close_command: str = ""
     open_command: str = ""
     #: 그리퍼 동작이 끝날 때까지 기다리는 시간 [s]. 피드백이 없으므로 시간으로 본다.
+    #: 닫을 때·열 때 따로 정할 수 있다(작업 UI). 음수면 action_wait_s 를 쓴다.
     action_wait_s: float = 1.5
+    close_wait_s: float = -1.0
+    open_wait_s: float = -1.0
     #: 토마토 중심에 카메라를 맞춘 상태에서, 그리퍼가 토마토 중심에 오도록
     #: 더 움직일 양 [mm]. README 측정값은 X +100, Y +32.5 (두산·아래 보기 기준).
     tcp_offset_mm: list = field(default_factory=lambda: [100.0, 32.5, 0.0])
     #: 위 값을 어느 프레임에서 더할지: "tool"(기본 — 카메라·그리퍼 모두 툴에
     #: 붙어 있어 자세와 상관없다) | "base"(예전).
     offset_frame: str = "tool"
+
+    def wait_s(self, closing: bool) -> float:
+        """닫기(closing=True)·열기 뒤에 기다릴 시간 [s]."""
+        value = self.close_wait_s if closing else self.open_wait_s
+        return float(value) if value is not None and value >= 0 else float(self.action_wait_s)
 
     @property
     def configured(self) -> bool:
@@ -179,7 +190,7 @@ class DescendConfig:
 class PickConfig:
     """시퀀스 전체 설정. pose 는 SI(m, rad), 관절값은 rad 로 들고 있는다."""
 
-    #: 1·10·15·17 단계 홈 자세 (관절값). 가르치기 전에는 None.
+    #: 1·10·15·16 단계 홈 자세 (관절값). 가르치기 전에는 None.
     home_joint: list = None
     pick_wait_pose: list = field(default_factory=lambda: list(_EMPTY_POSE))
     #: 대기 자세의 관절값. 가르칠 때 같이 저장한다. 없으면 로봇이 pose 로
@@ -298,6 +309,9 @@ PARAMETER_DEFAULTS = [
     ("gripper.close_command", ""),
     ("gripper.open_command", ""),
     ("gripper.action_wait_s", 1.5),
+    ("gripper.close_wait_s", -1.0),
+    ("gripper.open_wait_s", -1.0),
+    ("gripper.max_position", 8000),
     ("gripper.tcp_offset_mm", [100.0, 32.5, 0.0]),
     ("gripper.offset_frame", "tool"),
     ("descend.mode", "vision"),
@@ -362,6 +376,9 @@ def load(node) -> PickConfig:
             close_command=str(value("gripper.close_command")),
             open_command=str(value("gripper.open_command")),
             action_wait_s=float(value("gripper.action_wait_s")),
+            close_wait_s=float(value("gripper.close_wait_s")),
+            open_wait_s=float(value("gripper.open_wait_s")),
+            max_position=int(value("gripper.max_position")),
             tcp_offset_mm=[float(v) for v in value("gripper.tcp_offset_mm")],
             offset_frame=str(value("gripper.offset_frame")),
         ),

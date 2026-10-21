@@ -46,6 +46,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Empty, Float32MultiArray, Int32, String
 
+from . import teach_store
 from .process_manager import ManagedProcess, ProcessManager
 
 PACKAGE = "elite_robot_controller"
@@ -86,6 +87,10 @@ class VisionPanelNode(Node):
         self.declare_parameter("bridge_port", int(os.environ.get("BRIDGE_PORT", "9000")))
         self.declare_parameter("gripper_close_value", 4095)
         self.declare_parameter("gripper_open_value", 0)
+        #: 수동 이동([이동] 칸)에서 받는 위치 상한 — 그리퍼 노드의 max_position 과 같게.
+        self.declare_parameter("gripper_max_position", 8000)
+        #: 작업 UI 의 [그리퍼] 칸에서 저장한 닫기·열기 위치가 있으면 그것을 쓴다(같은 값).
+        self.declare_parameter("teach_file", teach_store.DEFAULT_PATH)
         #: True 면 패널이 뜨자마자 부품을 켠다 — 이미 떠 있는 것은 건너뛴다.
         self.declare_parameter("autostart", False)
         #: 로봇 PC 가 따로 있을 때(두 대로 나눌 때)만 TCP 브리지 서버를 부품으로 둔다.
@@ -98,8 +103,12 @@ class VisionPanelNode(Node):
         self.declare_parameter(
             "pick_config", os.path.join(elite_share, "config", "tomato_pick.yaml"))
 
-        self.close_value = int(self.get_parameter("gripper_close_value").value)
-        self.open_value = int(self.get_parameter("gripper_open_value").value)
+        self._close_default = int(self.get_parameter("gripper_close_value").value)
+        self._open_default = int(self.get_parameter("gripper_open_value").value)
+        self.max_position = int(self.get_parameter("gripper_max_position").value)
+        self._teach_file = str(self.get_parameter("teach_file").value)
+        self._teach_mtime = None
+        self.close_value, self.open_value = self._close_default, self._open_default
         self.bridge_port = int(self.get_parameter("bridge_port").value)
         self.bridge_enabled = bool(self.get_parameter("bridge").value)
         self._group = ReentrantCallbackGroup()
@@ -355,9 +364,24 @@ class VisionPanelNode(Node):
         self.pub_capture.publish(Empty())
         return {"success": True, "message": "최근접 촬영 요청 — 약 1.5 초 측정합니다."}
 
+    def _refresh_grip_values(self):
+        """작업 UI 에서 저장한 닫기·열기 위치를 읽는다(파일이 바뀌었을 때만)."""
+        path = teach_store.resolve(self._teach_file)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = None
+        if mtime == self._teach_mtime:
+            return
+        self._teach_mtime = mtime
+        taught = teach_store.load(self._teach_file) if mtime else {}
+        self.close_value = int(taught.get("gripper_close_value", self._close_default))
+        self.open_value = int(taught.get("gripper_open_value", self._open_default))
+
     def gripper(self, position):
-        if not isinstance(position, int) or not 0 <= position <= 4095:
-            return {"success": False, "message": f"위치는 0~4095 정수여야 합니다: {position!r}"}
+        top = self.max_position
+        if not isinstance(position, int) or not 0 <= position <= top:
+            return {"success": False, "message": f"위치는 0~{top} 정수여야 합니다: {position!r}"}
         if not self.manager.get("gripper").running and not self._external_pids("gripper"):
             return {"success": False, "message": "그리퍼 노드가 꺼져 있습니다 — 먼저 시작하세요."}
         self.pub_gripper.publish(Int32(data=position))
@@ -477,6 +501,7 @@ class VisionPanelNode(Node):
             self.get_logger().info(f"[상태] {text}  ({details})")
 
     def status(self):
+        self._refresh_grip_values()
         components = [self._component_status(name) for name in self.manager.items]
         ready = all(c["state"] in ("ready", "busy") for c in components)
         clients = ((self.bridge_status or {}).get("clients") or []) \
@@ -509,7 +534,8 @@ class VisionPanelNode(Node):
             "gripper": {"position": self.gripper_position,
                         "label": self._gripper_label(self.gripper_position)
                         if time.monotonic() - self.gripper_position_at < 2.0 else "",
-                        "close_value": self.close_value, "open_value": self.open_value},
+                        "close_value": self.close_value, "open_value": self.open_value,
+                        "max_position": self.max_position},
             "bridge": {"enabled": self.bridge_enabled, "port": self.bridge_port,
                        "clients": clients},
             "result": result,

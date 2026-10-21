@@ -18,9 +18,10 @@
     12 감속 하강
     13 그리퍼 열기
     14 상승
-    15 홈 자세 (movej)                                              ★ 경유점(거꾸로)
-    16 대기 자세 (movej) — 연속 운전이면 여기서 3 으로              ★ 경유점
-    17 작업 끝 — 홈 자세 (movej)                                     ★ 경유점(거꾸로)
+    15 홈 자세 (movej) — 연속 운전이면 여기서 2 로(대기 자세 -> 다음 토마토)
+                                                                    ★ 경유점(거꾸로)
+    16 작업 끝 — 홈 자세 (이미 홈이면 움직이지 않는다.
+       대기 자세에서 토마토가 없어 끝날 때는 경유점을 거꾸로 거쳐 홈으로)
 
 **하강 한계**: 가르친 하강 한계 자세의 베이스 Z 보다 아래로는 4·6·7 단계가 가지
 않는다. 목표가 아래면 움직이기 전에 멈추고, 움직이는 중에도 실제 TCP 가 아래로
@@ -67,8 +68,7 @@ STEP_ORDER = [
     ("RELEASE", "13. 그리퍼 열기"),
     ("PLACE_RETREAT", "14. 상승"),
     ("HOME_AFTER_PLACE", "15. 홈 자세로 이동"),
-    ("RETURN_WAIT", "16. 대기 자세로 이동"),
-    ("HOME_END", "17. 작업 끝 — 홈 자세로 이동"),
+    ("HOME_END", "16. 작업 끝 — 홈 자세로 이동"),
 ]
 STEPS = dict(STEP_ORDER)
 STEPS.update({
@@ -179,37 +179,64 @@ class PickSequenceNode(Node):
         geometry.set_orientation_format(self.cfg.orientation_format)
         self.taught = teach_store.load(self.teach_file)
         applied = teach_store.apply(self.cfg, self.taught)
+        # 그리퍼 클라이언트는 설정 객체를 들고 있다 — 새 설정으로 바꿔 끼운다.
+        if getattr(self, "gripper", None) is not None:
+            self.gripper.config = self.cfg.gripper
         if applied:
             self.get_logger().info(
                 f"[teach] 가르친 값 적용({teach_store.resolve(self.teach_file)}): "
                 + ", ".join(applied))
 
     def _on_set_parameters(self, params):
-        """놓기 접근 높이·남는 거리를 UI 에서 바꾼다. 검사해서 파일에도 남긴다."""
-        updates = {}
+        """UI 에서 바꾸는 값(놓기 높이, 그리퍼 위치·대기 시간)을 검사해서 파일에도 남긴다.
+
+        그리퍼 값은 파라미터 이름 `gripper.close_value` 등으로 들어와
+        teach_store 에 `gripper_close_value` 로 저장된다.
+        """
+        place, grip = {}, {}
         for param in params:
             if param.name in ("place_approach_mm", "place_release_gap_mm"):
-                updates[param.name] = float(param.value)
-        if not updates:
+                place[param.name] = float(param.value)
+            elif param.name.replace(".", "_") in teach_store.GRIPPER_SETTINGS:
+                grip[param.name.replace(".", "_")] = param.value
+        if not place and not grip:
             return SetParametersResult(successful=True)
         if self.state not in IDLE_STATES:
             return SetParametersResult(successful=False, reason="작업 중에는 바꿀 수 없습니다.")
-        approach = updates.get("place_approach_mm", self.cfg.place_approach_height * 1000.0)
-        gap = updates.get("place_release_gap_mm", self.cfg.place_release_gap * 1000.0)
-        if not 5.0 <= approach <= 500.0:
-            return SetParametersResult(successful=False,
-                                       reason="접근 높이는 5~500 mm 사이여야 합니다.")
-        if not 0.0 <= gap < approach:
-            return SetParametersResult(successful=False,
-                                       reason="여는 높이는 0 이상, 접근 높이보다 작아야 합니다.")
-        self.taught["place_approach_mm"] = round(approach, 1)
-        self.taught["place_release_gap_mm"] = round(gap, 1)
+        notes = []
+        if place:
+            approach = place.get("place_approach_mm", self.cfg.place_approach_height * 1000.0)
+            gap = place.get("place_release_gap_mm", self.cfg.place_release_gap * 1000.0)
+            if not 5.0 <= approach <= 500.0:
+                return SetParametersResult(successful=False,
+                                           reason="접근 높이는 5~500 mm 사이여야 합니다.")
+            if not 0.0 <= gap < approach:
+                return SetParametersResult(successful=False,
+                                           reason="여는 높이는 0 이상, 접근 높이보다 작아야 합니다.")
+            self.taught["place_approach_mm"] = round(approach, 1)
+            self.taught["place_release_gap_mm"] = round(gap, 1)
+            notes.append(f"놓기 접근 {approach:.1f} mm, 여는 높이 {gap:.1f} mm")
+        top = int(self.cfg.gripper.max_position)
+        for key, raw in grip.items():
+            kind = teach_store.GRIPPER_SETTINGS[key][1]
+            try:
+                value = kind(raw)
+            except (TypeError, ValueError):
+                return SetParametersResult(successful=False, reason=f"{key}: 숫자가 아닙니다.")
+            if kind is int and not 0 <= value <= top:
+                return SetParametersResult(
+                    successful=False, reason=f"그리퍼 위치는 0~{top} 사이여야 합니다({value}).")
+            if kind is float and not 0.0 <= value <= 30.0:
+                return SetParametersResult(
+                    successful=False, reason=f"그리퍼 대기 시간은 0~30 초여야 합니다({value}).")
+            self.taught[key] = round(value, 2) if kind is float else value
+            notes.append(f"{key} = {self.taught[key]}")
         try:
             teach_store.save(self.teach_file, self.taught)
         except Exception as exc:
             return SetParametersResult(successful=False, reason=f"저장 실패: {exc}")
         teach_store.apply(self.cfg, self.taught)
-        self.get_logger().info(f"[settings] 놓기 접근 {approach:.1f} mm, 여는 높이 {gap:.1f} mm")
+        self.get_logger().info("[settings] " + ", ".join(notes))
         return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------ 수신
@@ -552,7 +579,7 @@ class PickSequenceNode(Node):
 
     # ---- 8. 그리퍼 오므리기 ------------------------------------------
     def enter_grip(self):
-        self._gripper_action(self.gripper.close)
+        self._gripper_action(self.gripper.close, closing=True)
 
     def run_grip(self):
         if self._wait_until and self.now() >= self._wait_until:
@@ -591,7 +618,7 @@ class PickSequenceNode(Node):
         self._await_move("RELEASE")
 
     def enter_release(self):
-        self._gripper_action(self.gripper.open)
+        self._gripper_action(self.gripper.open, closing=False)
 
     def run_release(self):
         if self._wait_until and self.now() >= self._wait_until:
@@ -609,28 +636,28 @@ class PickSequenceNode(Node):
         self.go_home_via(self.cfg.waypoints_place)
 
     def run_home_after_place(self):
-        self._await_move("RETURN_WAIT")
-
-    # ---- 16. 대기 자세 -----------------------------------------------
-    def enter_return_wait(self):
-        self.go_wait_from_home()
-
-    def run_return_wait(self):
         if not self.goal_reached():
             if self.move_timed_out():
-                self.fail("대기 자세 복귀가 제한 시간 안에 끝나지 않았습니다.")
+                self.fail("놓은 뒤 홈 복귀가 제한 시간 안에 끝나지 않았습니다.")
             return
         self.cycle_count += 1
         self.finish_reason = f"토마토 {self.cycle_count}개를 옮겼습니다."
         if self.loop_mode:
+            # 연속 운전: 홈에서 바로 2 단계(대기 자세)로 가서 다음 토마토를 찍는다.
             self.publish_result(True)
             self._reset_cycle()
-            self.go("TRIGGER", "연속 운전 — 다음 토마토")
+            self.go("MOVE_WAIT", "연속 운전 — 다음 토마토: 2. 대기 자세로 이동")
         else:
+            self._at_home = True
             self.go("HOME_END")
 
-    # ---- 17. 작업 끝 -------------------------------------------------
+    # ---- 16. 작업 끝 -------------------------------------------------
     def enter_home_end(self):
+        if self._at_home:
+            # 15 단계에서 이미 홈에 왔다 — 다시 움직이지 않는다.
+            self._goal = None
+            return
+        # 대기 자세에서 토마토가 없어 끝나는 경우: 경유점을 거꾸로 거쳐 홈으로.
         self.go_home_via(self.cfg.waypoints_wait)
 
     def run_home_end(self):
@@ -645,13 +672,15 @@ class PickSequenceNode(Node):
         self.publish_result(self.cycle_count > 0)
 
     # ------------------------------------------------------------ 공통
-    def _gripper_action(self, action):
+    def _gripper_action(self, action, closing: bool):
+        """그리퍼를 움직이고, 정해 둔 시간(닫기/열기 따로 — 작업 UI)만큼 기다린다."""
         ok, note = action()
-        self.get_logger().info(note)
+        wait = self.cfg.gripper.wait_s(closing)
+        self.get_logger().info(f"{note} — {wait:.1f} 초 기다림")
         if not ok:
             self.fail(note)
             return
-        self._wait_until = self.now() + self.cfg.gripper.action_wait_s
+        self._wait_until = self.now() + wait
 
     def _reset_cycle(self):
         """한 사이클에서만 쓰는 값들을 초기화한다."""
@@ -670,6 +699,7 @@ class PickSequenceNode(Node):
         self._trigger_stamp = 0.0
         self.capture_mode = None
         self.finish_reason = ""
+        self._at_home = False
 
     # -------------------------------------------------------- 명령 처리
     def _can_start(self) -> tuple:
@@ -900,6 +930,13 @@ class PickSequenceNode(Node):
                 "place_approach_mm": round(self.cfg.place_approach_height * 1000.0, 1),
                 "place_release_gap_mm": round(self.cfg.place_release_gap * 1000.0, 1),
                 "descend_limit_pose": human_pose(self.cfg.descend_limit_pose),
+                "gripper": {
+                    "close_value": int(self.cfg.gripper.close_value),
+                    "open_value": int(self.cfg.gripper.open_value),
+                    "close_wait_s": round(self.cfg.gripper.wait_s(True), 2),
+                    "open_wait_s": round(self.cfg.gripper.wait_s(False), 2),
+                    "max_position": int(self.cfg.gripper.max_position),
+                },
             },
         }
         self.pub_status.publish(String(data=json.dumps(status, ensure_ascii=False)))

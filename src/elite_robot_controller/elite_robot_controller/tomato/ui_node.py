@@ -183,7 +183,14 @@ class PickUiNode(Node):
         client = self.param_clients[target]
         if not client.service_is_ready():
             return False, f"{target} 노드를 찾지 못했습니다"
-        kind = Parameter.Type.DOUBLE if isinstance(value, float) else Parameter.Type.STRING
+        if isinstance(value, bool):
+            kind = Parameter.Type.BOOL
+        elif isinstance(value, int):
+            kind = Parameter.Type.INTEGER
+        elif isinstance(value, float):
+            kind = Parameter.Type.DOUBLE
+        else:
+            kind = Parameter.Type.STRING
         request = SetParameters.Request(
             parameters=[Parameter(name, kind, value).to_parameter_msg()])
         future = client.call_async(request)
@@ -238,21 +245,37 @@ class PickUiNode(Node):
             "results": results,
         }
 
+    #: 화면에서 저장하는 숫자 -> (시퀀스 노드 파라미터, 이름, 형, 단위).
+    #: 시퀀스 노드가 범위를 검사하고 ~/.tomato_pick/taught_poses.yaml 에 남긴다.
+    SETTINGS = {
+        "place_approach_mm": ("place_approach_mm", "접근 높이", float, "mm"),
+        "place_release_gap_mm": ("place_release_gap_mm", "여는 높이", float, "mm"),
+        "gripper_close_value": ("gripper.close_value", "그리퍼 닫기 위치", int, ""),
+        "gripper_open_value": ("gripper.open_value", "그리퍼 열기 위치", int, ""),
+        "gripper_close_wait_s": ("gripper.close_wait_s", "닫을 때 대기", float, "초"),
+        "gripper_open_wait_s": ("gripper.open_wait_s", "열 때 대기", float, "초"),
+    }
+
     def save_settings(self, body: dict) -> dict:
-        """놓기 접근 높이·여는 높이 [mm]. 시퀀스 노드가 검사하고 파일에 남긴다."""
+        """놓기 높이 [mm], 그리퍼 위치·대기 시간. 시퀀스 노드가 검사하고 파일에 남긴다."""
         messages = []
-        for key, label in (("place_approach_mm", "접근 높이"),
-                           ("place_release_gap_mm", "여는 높이")):
-            if key not in body:
+        for key, (param, label, kind, unit) in self.SETTINGS.items():
+            if body.get(key) in (None, ""):
                 continue
             try:
-                value = float(body[key])
+                number = float(body[key])
+                if kind is int and number != int(number):
+                    raise ValueError
+                value = kind(number)
             except (TypeError, ValueError):
-                return {"success": False, "message": f"{label}: 숫자를 넣으세요."}
-            ok, reason = self._set_param("sequence", key, value)
+                return {"success": False, "message": f"{label}: "
+                        + ("정수를 넣으세요." if kind is int else "숫자를 넣으세요.")}
+            ok, reason = self._set_param("sequence", param, value)
             if not ok:
                 return {"success": False, "message": f"{label}: {reason}"}
-            messages.append(f"{label} {value:g} mm")
+            messages.append(f"{label} {value:g}{(' ' + unit) if unit else ''}")
+        if not messages:
+            return {"success": False, "message": "저장할 값이 없습니다."}
         return {"success": True, "message": "저장: " + ", ".join(messages)}
 
     def _connect_when_ready(self):

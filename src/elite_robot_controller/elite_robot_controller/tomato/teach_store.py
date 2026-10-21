@@ -34,7 +34,19 @@ FIELDS = (
     "place_approach_mm", "place_release_gap_mm",
     # 하강 한계 — 이 자세의 베이스 Z 보다 아래로는 가지 않는다(4·6·7 단계).
     "descend_limit_pose_mm_deg",
+    # 그리퍼 — 작업 UI 의 [그리퍼] 칸. 위치는 다이나믹셀 값, 시간은 초.
+    "gripper_close_value", "gripper_open_value",
+    "gripper_close_wait_s", "gripper_open_wait_s",
 )
+
+#: 작업 UI 에서 숫자로 정하는 값 -> (설정 객체 경로, 형). 시퀀스 노드의 SetParameters
+#: 이름도 이것이다(UI -> 파라미터 -> 이 파일).
+GRIPPER_SETTINGS = {
+    "gripper_close_value": ("close_value", int),
+    "gripper_open_value": ("open_value", int),
+    "gripper_close_wait_s": ("close_wait_s", float),
+    "gripper_open_wait_s": ("open_wait_s", float),
+}
 #: 예전 파일에 남아 있을 수 있는 항목. 읽을 때 조용히 버린다.
 #: (max_descend_z_mm: 예전에 숫자로 넣던 하강 한계 — 이제는 자세를 가르친다.
 #:  옛 값이 모르는 사이에 되살아나지 않게 읽지 않는다.)
@@ -117,6 +129,10 @@ def apply(cfg, values: dict) -> list:
     if pose and len(pose) == 6:
         cfg.descend_limit_pose = pick_config.pose_to_si(pose)
         applied.append("descend_limit_pose_mm_deg")
+    for key, (attr, kind) in GRIPPER_SETTINGS.items():
+        if values.get(key) is not None:
+            setattr(cfg.gripper, attr, kind(values[key]))
+            applied.append(key)
     if values.get("place_approach_mm") is not None:
         cfg.place_approach_height = float(values["place_approach_mm"]) * pick_config.MM_TO_M
         applied.append("place_approach_mm")

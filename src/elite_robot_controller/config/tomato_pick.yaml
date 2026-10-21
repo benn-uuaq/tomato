@@ -11,7 +11,7 @@
 #   1 홈 -> 2 대기(★경유점) -> 3 촬영 -> 4 카메라 중심 맞춤(TCP 기준) -> 5 무게
 #   -> 6 파지점 정렬(TCP 기준) -> 7 하강(TCP +z) -> 8 집기 -> 9 상승(TCP -z)
 #   -> 10 홈(★) -> 11 놓을 자리 위(★) -> 12 감속 하강 -> 13 놓기 -> 14 상승
-#   -> 15 홈(★) -> 16 대기(★) -> [연속이면 3 으로] -> 17 홈(★)
+#   -> 15 홈(★) -> [연속이면 2 대기(★) 로] -> 16 작업 끝(이미 홈)
 
 /tomato_pick_sequence:
   ros__parameters:
@@ -47,7 +47,7 @@
     # 실제 속도 = 아래 값 x 로봇 자체 속도 비율(펜던트 슬라이더).
     move_speed: 0.25               # 직선 이동 [m/s] (4, 6, 11~14 단계)
     move_accel: 0.80               # [m/s^2]
-    joint_speed: 0.5               # 관절 이동 [rad/s] (홈·대기·경유점 — 1, 2, 10, 15~17)
+    joint_speed: 0.5               # 관절 이동 [rad/s] (홈·대기·경유점 — 1, 2, 10, 15, 16)
     joint_accel: 1.0               # [rad/s^2]
     # 경유점에서 멈추지 않고 이 반경 안에서 이어 돈다 [m]. 0 이면 경유점마다
     # 선다 — 장애물 사이를 지날 때는 0 이 안전하다.
@@ -86,8 +86,10 @@
       # 틀리면 두 번째 촬영에서 오차가 줄지 않아 시퀀스가 스스로 멈춘다.
       detection_frame: "camera_delta"
       camera_axis_map: ["-y", "-x"]
-      align_frame: "tool"          # tool (TCP x·y) | base (예전, 아래 보기 전용)
-      align_max_step_mm: 100.0     # 이보다 큰 이동은 거절한다
+      # 2026-10-21 현장: tool 로는 카메라 축이 TCP 축과 약 41° 틀어져 중심 맞춤이 빗나갔다
+      # (아래를 보는 자세에서 측정) — 그래서 base. 벽을 보는 자세로 바꾸면 다시 본다.
+      align_frame: "base"          # tool (TCP x·y) | base (아래 보기 전용)
+      align_max_step_mm: 1000.0    # 이보다 큰 이동은 거절한다 (현장 설정)
       axis_check_ratio: 0.7        # 다시 찍은 오차가 첫 오차의 이 비율보다 크면 멈춘다
       # 중심에 맞춘 뒤 한 번 더 찍는다(그 무게가 정확한 값이다).
       align_iterations: 1
@@ -98,19 +100,25 @@
       hand_eye_xyz_mm: [0.0, 0.0, 0.0]
       hand_eye_rpy_deg: [0.0, 0.0, 0.0]
 
-    # --- 그리퍼 (5, 7, 9 단계) --------------------------------------
+    # --- 그리퍼 (6, 8, 13 단계) -------------------------------------
+    # 닫기·열기 위치와 기다리는 시간은 작업 UI 의 [그리퍼] 칸에서 바꾼다(그 값이 우선,
+    # ~/.tomato_pick/taught_poses.yaml). 아래는 처음 값이다.
     gripper:
       backend: "int_topic"         # 다이나믹셀 XD540: /set_pos 로 목표 위치
       topic: "/set_pos"
-      close_value: 4095            # 파지 (README.odt 2026-10, 예전 3185)
+      close_value: 6000            # 파지 — 4095 가 한 바퀴, 확장 위치 모드라 넘어도 된다
       open_value: 0                # 열기
-      action_wait_s: 1.5           # 동작이 끝날 때까지 기다리는 시간
+      max_position: 8000           # 위치 상한 — 아래 /gripper_dynamixel.max_position 과 같게
+      close_wait_s: 1.5            # 8 단계: 닫는 동안 기다리는 시간 [s]
+      open_wait_s: 1.5             # 13 단계: 여는 동안 기다리는 시간 [s]
+      action_wait_s: 1.5           # (예전) 위 두 값이 음수일 때 쓰는 시간
       # 카메라 중심에 맞춘 뒤 그리퍼 중심까지 더 갈 양 [mm], **TCP 기준**.
       # README 의 X 100, Y 32.5 는 두산·아래 보기·베이스 기준 측정값이다 — ★ CS616 의
       # TCP 축으로 다시 확인한다(README.odt: 카메라는 플랜지에서 정면 100.045 mm,
       # 화면 중심은 오른쪽 17.5 mm).
-      tcp_offset_mm: [100.0, 32.5, 0.0]
-      offset_frame: "tool"         # tool | base (예전)
+      # offset_frame 이 base 면 Z 는 베이스 +Z(위쪽)다 — 20 이면 20 mm 위에서 하강을 시작한다.
+      tcp_offset_mm: [100.0, 32.5, 20.0]
+      offset_frame: "base"         # tool | base (현장: align_frame 과 같이 base)
 
 /tomato_pick_ui:
   ros__parameters:
@@ -123,6 +131,11 @@
     baudrate: 57600
     dxl_id: 1
     command_topic: "/set_pos"
+    # 4095 가 한 바퀴. 넘으면 노드가 모터를 확장 위치 모드(4)로 두고 쓴다.
+    max_position: 8000
+    # 여러 바퀴를 돌 때 너무 빠르지 않게 (x0.229 rpm / x214.577 rev/min^2, 0 = 안 건드림)
+    profile_velocity: 150
+    profile_acceleration: 50
 
 /tomato_area_calculator_d435i_v2:
   ros__parameters:
@@ -137,5 +150,7 @@
 /tomato_vision_panel:
   ros__parameters:
     ui_port: 8081
-    gripper_close_value: 4095      # [닫기] 버튼 (집기, 예전 3185)
+    # [열기]/[닫기] 버튼 — 작업 UI 의 [그리퍼] 칸에서 저장한 값이 있으면 그것을 쓴다.
+    gripper_close_value: 6000      # [닫기] 버튼 (집기)
     gripper_open_value: 0          # [열기] 버튼
+    gripper_max_position: 8000     # [이동] 칸에 넣을 수 있는 상한

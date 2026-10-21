@@ -89,7 +89,7 @@ const EXTRA = {
       <button id="btnClose" onclick="gripper(GRIP.close_value)">닫기 (집기)</button>
     </div>
     <div class="field">
-      <input id="gripPos" type="number" min="0" max="4095" step="1" placeholder="목표 위치 0~4095">
+      <input id="gripPos" type="number" min="0" max="8000" step="1" placeholder="목표 위치 0~8000">
       <button style="flex:0 0 90px" onclick="gripper(parseInt(document.getElementById('gripPos').value))">이동</button>
     </div>`,
   bridge: `<div class="sub" id="bridgeInfo"></div>`,
@@ -200,6 +200,11 @@ function render(s) {
   for (const id of ['btnOpen', 'btnClose']) document.getElementById(id).disabled = !grip.running;
   document.getElementById('btnOpen').textContent = `열기 (${GRIP.open_value})`;
   document.getElementById('btnClose').textContent = `닫기 · 집기 (${GRIP.close_value})`;
+  const pos = document.getElementById('gripPos');
+  if (GRIP.max_position && pos.max != GRIP.max_position) {
+    pos.max = GRIP.max_position;
+    pos.placeholder = `목표 위치 0~${GRIP.max_position}`;
+  }
 
   // 외부 통신 (두 대로 나눌 때만)
   const bridgeInfo = document.getElementById('bridgeInfo');
