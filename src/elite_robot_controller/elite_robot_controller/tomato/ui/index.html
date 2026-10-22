@@ -76,7 +76,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>토마토 픽앤플레이스 &mdash; Elite CS616</h1>
+  <h1>토마토 픽앤플레이스 &mdash; Elite CS616 <span class="pill" id="seqVersion" hidden></span></h1>
 
   <div class="card" id="conncard">
     <strong style="font-size:14px">연결</strong>
@@ -588,6 +588,13 @@ async function poll() {
     renderConnection(s);
     renderVisionPanel(s);
     renderWeightModal(s);
+    // 어느 판으로 띄웠는지(robot_run.sh = v1, robot_run_v2.sh = v2)
+    const ver = document.getElementById('seqVersion');
+    if (s.sequence_version) {
+      ver.hidden = false;
+      ver.textContent = s.sequence_version >= 2 ? '시퀀스 v2 · 재측정 위치로 보정' : '시퀀스 v1';
+      ver.className = 'pill' + (s.sequence_version >= 2 ? ' on' : '');
+    }
     // 작업이 도는 중이면 선택 칸도 그 작업을 보여 준다(다른 화면에서 시작했어도).
     if (!['IDLE', 'DONE', 'ERROR'].includes(s.state) && s.job && s.job !== JOB) selectJob(s.job);
     if (s.sequence_alive === false) {

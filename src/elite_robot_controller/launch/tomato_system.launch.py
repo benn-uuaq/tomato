@@ -121,7 +121,8 @@ def _launch_setup(context):
         actions.append(Node(
             package=PACKAGE, executable='pick_sequence_node',
             name='tomato_pick_sequence', output='screen',
-            parameters=[pick_config],
+            # 시퀀스 판은 띄운 스크립트가 정한다(robot_run.sh = 1, robot_run_v2.sh = 2).
+            parameters=[pick_config, {'sequence_version': int(value('sequence_version'))}],
         ))
 
     # ---- 5. UI --------------------------------------------------------
@@ -199,6 +200,9 @@ def generate_launch_description():
         DeclareLaunchArgument('gripper', default_value='true', description='그리퍼 노드 실행 여부'),
         DeclareLaunchArgument('robot', default_value='true', description='로봇·시퀀스 노드 실행 여부'),
         DeclareLaunchArgument('ui', default_value='true', description='웹 UI 실행 여부'),
+        DeclareLaunchArgument('sequence_version', default_value='1',
+                              description='시퀀스 판: 1 (robot_run.sh) | 2 (robot_run_v2.sh — '
+                                          '재측정 위치로 파지점 보정)'),
         DeclareLaunchArgument('panel', default_value='false',
                               description='비전 패널(8081) 실행 여부 — 한 대에서 다 돌릴 때'),
         DeclareLaunchArgument('vision_autostart', default_value='false',

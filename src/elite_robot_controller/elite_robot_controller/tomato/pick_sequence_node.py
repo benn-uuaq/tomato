@@ -24,6 +24,14 @@
     17 작업 끝 — 홈 자세 (이미 홈이면 움직이지 않는다.
        대기 자세에서 토마토가 없어 끝날 때는 경유점을 거꾸로 거쳐 홈으로)
 
+**시퀀스 판** (어느 스크립트로 띄웠는지 — sequence_version)
+
+    v1 : ./robot_run.sh    — 7 파지점은 카메라 중심을 맞춘 자세 기준. 4 의 재측정은
+                             검사(축 대응)·깊이·무게에만 쓴다.
+    v2 : ./robot_run_v2.sh — 4 번 트리거 재측정(/tomato/middle_position, middle_weight)이
+                             알려 준 **카메라 중심 기준 토마토 위치**만큼 7 파지점을 보정한다
+                             (로봇을 한 번 더 움직이지 않고 목표에 더한다). 깊이·무게도 그 값.
+
 **작업 종류** (UI 에서 고른다)
 
     pick   : 픽앤플레이스 — 위 1~16 단계
@@ -107,6 +115,12 @@ WEIGHT_STEP_ORDER_CAPTURE = [
     ("HOME_END", "7. 작업 끝 — 홈 자세로 이동"),
 ]
 JOB_ORDERS = {"pick": STEP_ORDER, "weight": WEIGHT_STEP_ORDER}
+#: v2(robot_run_v2.sh) 에서 이름이 달라지는 단계.
+V2_LABELS = {
+    "CENTER": "4. 카메라 중심 맞춤 → 중앙 재측정 (위치·무게)",
+    "MEASURE": "5. 크기·무게 확인 (재측정 값)",
+    "ALIGN": "7. 그리퍼 파지점 정렬 (재측정 위치로 보정)",
+}
 JOB_LABELS = {"pick": "픽앤플레이스", "weight": "무게 추정"}
 STEPS = dict(WEIGHT_STEP_ORDER_CAPTURE)
 STEPS.update(dict(WEIGHT_STEP_ORDER))
@@ -221,7 +235,7 @@ class PickSequenceNode(Node):
         if gaps:
             self.get_logger().warn("[설정] 아직 비어 있는 값: " + ", ".join(gaps))
         self.get_logger().info(
-            f"[pick] 시퀀스 노드 시작 (회전 표기 {geometry.ORIENTATION}, "
+            f"[pick] 시퀀스 노드 시작 — v{self.cfg.sequence_version} (회전 표기 {geometry.ORIENTATION}, "
             f"정렬 {self.cfg.vision.align_frame} 기준, 하강 {self.cfg.descend.mode}, "
             f"촬영 {self.cfg.vision.first_capture} -> {self.cfg.vision.recapture})")
 
@@ -378,6 +392,8 @@ class PickSequenceNode(Node):
         if self.job == "weight":
             return (WEIGHT_STEP_ORDER if self.cfg.vision.weight_capture == "recapture"
                     else WEIGHT_STEP_ORDER_CAPTURE)
+        if self.cfg.sequence_version >= 2:
+            return [(state, V2_LABELS.get(state, label)) for state, label in STEP_ORDER]
         return STEP_ORDER
 
     def step_label(self, state: str) -> str:
@@ -615,6 +631,16 @@ class PickSequenceNode(Node):
             return
         self._prev_residual = residual
 
+        if self._captures >= 2 and self.cfg.sequence_version >= 2:
+            # v2: 다시 움직이지 않는다 — 재측정이 알려 준 카메라 중심 기준 위치(남은 차이)를
+            # 그대로 파지점(7)에 더한다. 깊이·무게도 이 재측정 값이다(위에서 이미 받음).
+            self.recapture_delta = list(delta)
+            self.get_logger().info(
+                f"[v2] 재측정 위치로 파지점 보정 — dx {delta[0] * 1000:+.1f}, "
+                f"dy {delta[1] * 1000:+.1f} mm ({self.cfg.vision.align_frame} 기준)")
+            self._after_centering()
+            return
+
         if self._captures == 1 or (residual > self.cfg.vision.align_tolerance_mm
                                    and self._align_left > 0):
             self.center_target = plan.center_pose(self.trigger_pose, delta,
@@ -760,6 +786,9 @@ class PickSequenceNode(Node):
         돌려도 이 위치는 그대로이고, 방향만 6 단계에서 돌린 자세(orientation)를 쓴다.
         """
         base = self.centered_pose or self.trigger_pose
+        if self.recapture_delta is not None:
+            # v2: 재측정으로 본 남은 차이만큼 — 중심 맞춤과 같은 기준(align_frame)으로 옮긴 자리.
+            base = plan.center_pose(base, self.recapture_delta, self.cfg.vision.align_frame)
         grip = plan.grip_pose(base, self.cfg.gripper.tcp_offset_mm, self.cfg.gripper.offset_frame)
         if orientation is not None:
             grip = list(grip[:3]) + list(orientation)
@@ -917,6 +946,7 @@ class PickSequenceNode(Node):
         self.grip_target = None
         self.descend_target = None
         self.wrist_target = None
+        self.recapture_delta = None     # v2: 재측정으로 본 남은 차이 [m] (dx, dy)
         self.travel_mm = None
         self.depth_mm = None
         self.residual_mm = None
@@ -1166,6 +1196,9 @@ class PickSequenceNode(Node):
             "step": self.step_label(self.state),
             "order": self.job_order(),
             "job": self.job,
+            "sequence_version": self.cfg.sequence_version,
+            "recapture_delta_mm": ([round(v * 1000.0, 1) for v in self.recapture_delta]
+                                   if self.recapture_delta is not None else None),
             "job_label": JOB_LABELS.get(self.job, self.job),
             "weight_result": self.weight_result,
             "missing_weight": self.cfg.missing("weight"),

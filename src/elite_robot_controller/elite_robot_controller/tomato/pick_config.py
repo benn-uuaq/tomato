@@ -270,6 +270,10 @@ class PickConfig:
     move_timeout_s: float = 40.0
     #: 로봇이 보고하는 회전 표기: "rpy" | "rotvec" (geometry 머리말 참고).
     orientation_format: str = "rpy"
+    #: 시퀀스 판. 1 = robot_run.sh — 파지점은 카메라 중심 맞춘 자세 기준(재측정은 검사·깊이·
+    #: 무게에만). 2 = robot_run_v2.sh — 4 번 트리거 재측정(middle_position)이 알려 준 카메라
+    #: 중심 기준 위치로 파지점을 보정하고, 깊이·무게도 그 재측정 값을 쓴다.
+    sequence_version: int = 1
     #: 6 단계 — 카메라 중심을 맞춘 뒤 그리퍼 파지점으로 가기 전에 6 축(손목)을 이만큼
     #: 돌린다 [deg]. 그리퍼 방향을 토마토에 맞추려고 쓴다. 0 이면 돌리지 않는다.
     wrist_rotate_deg: float = 0.0
@@ -349,6 +353,7 @@ PARAMETER_DEFAULTS = [
     ("settle_time_s", 0.3),
     ("move_timeout_s", 40.0),
     ("orientation_format", "rpy"),
+    ("sequence_version", 1),
     ("wrist_rotate_deg", 0.0),
     ("joint6_limit_deg", 360.0),
     ("vision.first_capture", "nearest"),
@@ -430,6 +435,7 @@ def load(node) -> PickConfig:
         settle_time_s=float(value("settle_time_s")),
         move_timeout_s=float(value("move_timeout_s")),
         orientation_format=str(value("orientation_format")),
+        sequence_version=int(value("sequence_version")),
         wrist_rotate_deg=float(value("wrist_rotate_deg")),
         joint6_limit_deg=float(value("joint6_limit_deg")),
         vision=VisionConfig(

@@ -850,6 +850,7 @@ def test_wrist_rotates_before_gripper_alignment():
             self.centered_pose = [0.75, -0.24, 0.64, math.pi, 0.0, math.radians(47.0)]
             self.trigger_pose = None
             self.joints = [0.0, -1.5, -1.0, -1.2, 1.57, math.radians(j6_deg)]
+            self.recapture_delta = None
             self.went, self.failed = None, None
 
         def get_logger(self):
@@ -884,3 +885,62 @@ def test_wrist_rotates_before_gripper_alignment():
     node = Fake(0.0)
     PickSequenceNode.run_measure(node)
     assert node.went == "ALIGN" and node.grip_target[3:] == node.centered_pose[3:]
+
+
+def test_v2_corrects_grip_with_recapture_position():
+    """v2(robot_run_v2.sh): 4 번 트리거 재측정이 알려 준 카메라 중심 기준 위치만큼 파지점을
+    보정한다(다시 움직이지 않고). v1 은 중심 맞춘 자세 그대로."""
+    import math
+    from elite_robot_controller.tomato.pick_sequence_node import PickSequenceNode, V2_LABELS
+
+    class Log:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class Vision:
+        def __init__(self, det):
+            self.latest, self.latest_stamp = [det], 5.0
+
+    class Fake:
+        _plan_grip = PickSequenceNode._plan_grip
+        _floor_ok = PickSequenceNode._floor_ok
+        _after_centering = PickSequenceNode._after_centering
+
+        def __init__(self, version):
+            self.cfg = pick_config.PickConfig(
+                sequence_version=version,
+                vision=pick_config.VisionConfig(camera_axis_map=["x", "-y"], align_frame="base"),
+                gripper=pick_config.GripperConfig(tcp_offset_mm=[-32.5, 100.0, 20.0],
+                                                  offset_frame="base"))
+            self.job, self.capture_mode = "pick", "middle"
+            # 중심 맞춘 뒤의 재측정: 카메라 x +8 mm, y +6 mm 에 남아 있다.
+            self.vision = Vision(vision_interface.Detection(x=0.008, y=0.006, z=0.29, weight=111.0))
+            self._trigger_stamp, self._entered_at = 1.0, 1.0
+            self._captures, self._prev_residual, self._align_left = 1, 40.0, 0
+            self.centered_pose = [0.60, 0.19, 0.56, math.pi, 0.0, 0.0]
+            self.trigger_pose = None
+            self.recapture_delta, self.travel_mm = None, 200.0
+            self.went = None
+
+        def now(self):
+            return 2.0
+
+        def get_logger(self):
+            return Log()
+
+        def go(self, state, message=""):
+            self.went = state
+
+        def fail(self, reason):
+            raise AssertionError(reason)
+
+    for version, shift in ((1, (0.0, 0.0)), (2, (0.008, -0.006))):
+        node = Fake(version)
+        PickSequenceNode.run_wait_detect(node)          # 두 번째 촬영(재측정) 결과 받기
+        assert node.went == "MEASURE"
+        assert node.depth_mm == 290.0 and node.target.weight == 111.0
+        assert node._plan_grip(None)
+        # 파지점 = 중심 자세 (+ v2 는 재측정 보정: x -> dx, -y -> dy) + 오프셋
+        expect = [0.60 + shift[0] - 0.0325, 0.19 + shift[1] + 0.100, 0.56 + 0.020]
+        assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(node.grip_target[:3], expect))
+    assert "재측정" in V2_LABELS["ALIGN"]
